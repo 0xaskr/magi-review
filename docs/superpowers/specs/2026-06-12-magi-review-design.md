@@ -35,8 +35,10 @@ CLI / future adapter
   -> load ReviewConfig
   -> run reviewer agents
   -> normalize ReviewerResult[]
-  -> synthesize ReviewResult
-  -> report text/json
+  -> aggregate review evidence
+  -> apply decision policy
+  -> build ReviewResult
+  -> report json
 ```
 
 ### Layers
@@ -48,19 +50,19 @@ CLI / future adapter
    - Adapters may collect platform-specific metadata, but they must not implement review semantics.
 
 2. **Core Layer**
-   - Owns config loading, canonical diff normalization, orchestration, normalization, synthesis, and result contracts.
+   - Owns config loading, canonical diff normalization, orchestration, normalization, aggregation, and result contracts.
    - Exposes stable APIs for adapters.
    - Does not know whether it is called by CLI, MCP, CI, or an agent runtime.
 
 3. **Model Provider Layer**
    - Wraps Anthropic, OpenAI, Gemini, local models, or other providers behind one provider interface.
    - Reviewer roles depend on the provider interface, not provider SDKs.
-   - Provider-specific metadata is preserved in diagnostics but normalized before synthesis.
+   - Provider-specific metadata is preserved in diagnostics but normalized before aggregation.
 
 4. **Reporting Layer**
-   - Emits human-readable terminal output.
-   - Emits strict JSON for machine consumers.
-   - In `--json` mode, stdout is reserved for JSON only; logs, warnings, progress, and diagnostics go to stderr.
+   - Outputs strict JSON to stdout by default.
+   - Optional `--summary` flag outputs a human-readable summary.
+   - Logs, warnings, progress, and diagnostics always go to stderr.
 
 ## Default Reviewer Roles
 
@@ -97,22 +99,75 @@ Focuses on breaking the change:
 - missing tests for non-happy paths
 - hidden AI hallucination effects
 
-The adversarial reviewer should not also act as final judge. Final judgment belongs to a separate synthesizer/arbiter stage.
+The adversarial reviewer should not also act as final judge. The final verdict is determined by the decision policy based on evidence produced by the aggregator.
 
-## Synthesizer / Arbiter
+## Aggregator
 
-The synthesizer receives normalized reviewer results and produces the final `ReviewResult`.
+The aggregator receives normalized reviewer results and produces aggregated review evidence for the decision policy. It does not decide the final top-level verdict.
 
 Responsibilities:
 
 - merge duplicate findings
 - preserve reviewer provenance
-- resolve conflicts conservatively
-- assign final severity and blocking status
-- produce a top-level verdict
-- explain degraded or incomplete review quality
+- aggregate reviewer comments
+- normalize reviewer errors
+- resolve finding-level conflicts conservatively
+- assign aggregated severity and blocking status to findings
+- produce a factual summary for the decision policy
+- explain degraded or incomplete review evidence
 
-The synthesizer may use a model provider, but its output must be normalized into the same stable result schema as any fallback path.
+The aggregator may use a model provider, but its output must be normalized into the same stable evidence schema as any fallback path. If the aggregator fails, rule fallback must still preserve reviewer results and provide conservative evidence for the decision policy.
+
+## Decision Policy
+
+The decision policy consumes aggregated evidence and determines the final `ReviewResult.verdict`. Decision logic is implemented by the core script/policy layer, not by reviewer roles or the aggregator.
+
+### Impact Rating and Policy Escalation
+
+Each reviewer provides an impact rating alongside its verdict: `major` or `normal`. The aggregator collects impact ratings from all usable reviewers and determines the overall impact by majority vote:
+
+- If a majority of reviewers rate the change as `major`, the overall impact is `major` and the decision policy automatically escalates to unanimous approval.
+- If a majority of reviewers rate the change as `normal`, the overall impact is `normal` and the default majority policy applies.
+
+The CLI flag `--decision-policy unanimous` can explicitly force unanimous mode regardless of reviewer impact ratings.
+
+### Policy Rules
+
+The default policy is majority vote among required reviewers. When the overall impact rating is `major`, the CLI explicitly specifies unanimous mode, or configuration requires unanimous approval, the policy escalates to unanimous.
+
+Decision policies must preserve these invariants:
+
+- reviewer count must be odd
+- when `status = degraded` or `status = error`, consumers should combine `status` with `verdict` to decide trust
+
+### Verdict Mapping Under Majority Policy (default, 3 reviewers)
+
+| Reviewer A | Reviewer B | Reviewer C | Overall status | Overall verdict | Notes |
+|---|---|---|---|---|---|
+| approve | approve | approve | `completed` | `approve` | Unanimous approval |
+| approve | approve | request_changes | `completed` | `approve` | Majority approves |
+| approve | approve | error | `degraded` | `approve` | Majority approves but error degrades result |
+| approve | request_changes | request_changes | `completed` | `request_changes` | Majority requests changes |
+| approve | request_changes | error | `degraded` | `request_changes` | Has request_changes and error |
+| approve | error | error | `degraded` | `approve` | Only approval with no objection, result degraded |
+| request_changes | request_changes | request_changes | `completed` | `request_changes` | Unanimous request changes |
+| request_changes | request_changes | error | `degraded` | `request_changes` | Majority requests changes |
+| request_changes | error | error | `degraded` | `request_changes` | Has request_changes |
+| error | error | error | `error` | `none` | All errored, no usable judgment |
+
+### Verdict Mapping Under Unanimous Policy (major impact mode)
+
+| Reviewer A | Reviewer B | Reviewer C | Overall status | Overall verdict | Notes |
+|---|---|---|---|---|---|
+| approve | approve | approve | `completed` | `approve` | Unanimous approval |
+| approve | approve | request_changes | `completed` | `request_changes` | Not unanimous |
+| approve | request_changes | request_changes | `completed` | `request_changes` | Not unanimous |
+| any with error (not all) | — | — | `degraded` | completed reviewers' judgment | Error degrades result |
+| error | error | error | `error` | `none` | All errored, no usable judgment |
+
+## Implementation Language
+
+All production code, tests, and first-party tooling are implemented in Python. Schema examples in this document are illustrative contracts; implementation should represent them with Python types such as dataclasses, Pydantic models, TypedDicts, or equivalent project-standard Python constructs.
 
 ## Canonical Diff Contract
 
@@ -133,186 +188,243 @@ Adapters may collect source-specific input, but core owns canonical normalizatio
 
 ## Review Input Schema
 
-```ts
-type ReviewInput = {
-  schemaVersion: "1.0";
-  source: "git-diff" | "patch" | "stdin" | "pr-diff";
-  repository?: {
-    root?: string;
-    branch?: string;
-    baseRef?: string;
-    headRef?: string;
-    commitSha?: string;
-  };
-  changes: Change[];
-  context?: ReviewContext;
-  inputHash: string;
-};
+```python
+class RepositoryMetadata(TypedDict, total=False):
+    root: str
+    branch: str
+    base_ref: str
+    head_ref: str
+    commit_sha: str
 
-type Change = {
-  path: string;
-  oldPath?: string;
-  language?: string;
-  status: "added" | "modified" | "deleted" | "renamed";
-  isBinary?: boolean;
-  modeChange?: {
-    oldMode?: string;
-    newMode?: string;
-  };
-  hunks: Hunk[];
-};
 
-type Hunk = {
-  id: string;
-  oldStart: number;
-  oldLines: number;
-  newStart: number;
-  newLines: number;
-  patch: string;
-  noNewlineAtEndOfFile?: boolean;
-};
+class ModeChange(TypedDict, total=False):
+    old_mode: str
+    new_mode: str
 
-type ReviewContext = {
-  task?: string;
-  aiTool?: "claude" | "codex" | "gemini" | "opencode" | "unknown";
-  instructions?: string;
-};
+
+class Hunk(TypedDict):
+    id: str
+    old_start: int
+    old_lines: int
+    new_start: int
+    new_lines: int
+    patch: str
+    no_newline_at_end_of_file: NotRequired[bool]
+
+
+class Change(TypedDict):
+    path: str
+    old_path: NotRequired[str]
+    language: NotRequired[str]
+    status: Literal["added", "modified", "deleted", "renamed"]
+    is_binary: NotRequired[bool]
+    mode_change: NotRequired[ModeChange]
+    hunks: list[Hunk]
+
+
+class ReviewContext(TypedDict, total=False):
+    task: str
+    ai_tool: Literal["claude", "codex", "gemini", "opencode", "unknown"]
+    instructions: str
+
+
+class ReviewInput(TypedDict):
+    schema_version: Literal["1.0"]
+    source: Literal["git-diff", "patch", "stdin", "pr-diff"]
+    repository: NotRequired[RepositoryMetadata]
+    changes: list[Change]
+    context: NotRequired[ReviewContext]
+    input_hash: str
 ```
 
 ## Finding Location Model
 
 Findings need enough location data for CLI output and future PR comments.
 
-```ts
-type FindingLocation = {
-  path: string;
-  oldPath?: string;
-  side: "old" | "new";
-  line?: number;
-  range?: {
-    startLine: number;
-    endLine: number;
-  };
-  hunkId?: string;
-  commitSha?: string;
-};
+```python
+class FindingRange(TypedDict):
+    start_line: int
+    end_line: int
+
+
+class FindingLocation(TypedDict):
+    path: str
+    old_path: NotRequired[str]
+    side: Literal["old", "new"]
+    line: NotRequired[int]
+    range: NotRequired[FindingRange]
+    hunk_id: NotRequired[str]
+    commit_sha: NotRequired[str]
 ```
 
 A finding may omit location only when it is genuinely repository-level or change-level.
 
 ## Reviewer Result Schema
 
-```ts
-type ReviewerResult = {
-  reviewerId: string;
-  role: string;
-  required: boolean;
-  model: string;
-  provider: string;
-  status: "completed" | "degraded" | "failed";
-  degradationReason?:
-    | "api_error"
-    | "timeout"
-    | "invalid_output"
-    | "rate_limited"
-    | "budget_exceeded"
-    | "cancelled";
-  verdict: "approve" | "comment" | "request_changes" | "inconclusive";
-  findings: ReviewerFinding[];
-  rawOutput?: string;
-  metadata: ReviewerMetadata;
-};
+```python
+class ReviewerComment(TypedDict):
+    id: str
+    location: NotRequired[FindingLocation]
+    category: Literal[
+        "correctness",
+        "security",
+        "architecture",
+        "maintainability",
+        "testing",
+        "performance",
+        "adversarial",
+        "diagnostic",
+    ]
+    message: str
+    source_finding_ids: NotRequired[list[str]]
 
-type ReviewerFinding = {
-  id: string;
-  location?: FindingLocation;
-  severity: "critical" | "high" | "medium" | "low" | "info";
-  category:
-    | "correctness"
-    | "security"
-    | "architecture"
-    | "maintainability"
-    | "testing"
-    | "performance"
-    | "adversarial";
-  confidence: "high" | "medium" | "low";
-  title: string;
-  rationale: string;
-  suggestion?: string;
-};
 
-type ReviewerMetadata = {
-  startedAt: string;
-  finishedAt?: string;
-  promptHash: string;
-  configHash: string;
-  inputHash: string;
-  tokenUsage?: {
-    input?: number;
-    output?: number;
-  };
-};
+class ReviewerFinding(TypedDict):
+    id: str
+    location: NotRequired[FindingLocation]
+    severity: Literal["critical", "high", "medium", "low", "info"]
+    category: Literal[
+        "correctness",
+        "security",
+        "architecture",
+        "maintainability",
+        "testing",
+        "performance",
+        "adversarial",
+    ]
+    confidence: Literal["high", "medium", "low"]
+    title: str
+    rationale: str
+    suggestion: NotRequired[str]
+
+
+class TokenUsage(TypedDict, total=False):
+    input: int
+    output: int
+
+
+class ReviewerMetadata(TypedDict):
+    started_at: str
+    finished_at: NotRequired[str]
+    prompt_hash: str
+    config_hash: str
+    input_hash: str
+    token_usage: NotRequired[TokenUsage]
+
+
+class ReviewError(TypedDict):
+    source: Literal["input", "config", "reviewer", "aggregator", "reporter"]
+    code: str
+    message: str
+    reviewer_id: NotRequired[str]
+
+
+class ReviewerResult(TypedDict):
+    reviewer_id: str
+    role: str
+    required: bool
+    model: str
+    provider: str
+    status: Literal["completed", "error"]
+    error_reason: NotRequired[
+        Literal[
+            "api_error",
+            "timeout",
+            "invalid_output",
+            "rate_limited",
+            "budget_exceeded",
+            "cancelled",
+        ]
+    ]
+    verdict: NotRequired[Literal["approve", "request_changes"]]
+    impact: NotRequired[Literal["major", "normal"]]
+    comments: list[ReviewerComment]
+    findings: list[ReviewerFinding]
+    error: NotRequired[ReviewError]
+    raw_output: NotRequired[str]
+    metadata: ReviewerMetadata
 ```
 
 ## Review Result Envelope
 
-Every output path uses the same JSON envelope: success, degraded success, synthesizer fallback, and failure.
+Every output path uses the same JSON envelope: success, degraded success, aggregator fallback, and failure.
 
-```ts
-type ReviewResult = {
-  schemaVersion: "1.0";
-  status: "completed" | "degraded" | "failed";
-  quality: "complete" | "degraded";
-  verdict: "approve" | "comment" | "request_changes" | "inconclusive";
-  synthesisStatus: "completed" | "degraded" | "failed";
-  synthesisMode: "model" | "rule_fallback" | "raw_reviewer_results";
-  summary: string;
-  findings: SynthesizedFinding[];
-  reviewerResults: ReviewerResult[];
-  errors: ReviewError[];
-  metadata: ReviewMetadata;
-};
+```python
+class ReviewComment(TypedDict):
+    id: str
+    source_reviewer_ids: list[str]
+    location: NotRequired[FindingLocation]
+    category: str
+    message: str
+    source_finding_ids: NotRequired[list[str]]
 
-type SynthesizedFinding = {
-  id: string;
-  sourceReviewerIds: string[];
-  location?: FindingLocation;
-  severity: "critical" | "high" | "medium" | "low" | "info";
-  category: string;
-  confidence: "high" | "medium" | "low";
-  title: string;
-  rationale: string;
-  suggestion?: string;
-  status: "blocking" | "non_blocking";
-};
 
-type ReviewError = {
-  source: "input" | "config" | "reviewer" | "synthesizer" | "reporter";
-  code: string;
-  message: string;
-  reviewerId?: string;
-};
+class AggregatedFinding(TypedDict):
+    id: str
+    source_reviewer_ids: list[str]
+    location: NotRequired[FindingLocation]
+    severity: Literal["critical", "high", "medium", "low", "info"]
+    category: str
+    confidence: Literal["high", "medium", "low"]
+    title: str
+    rationale: str
+    suggestion: NotRequired[str]
+    status: Literal["blocking", "non_blocking"]
 
-type ReviewMetadata = {
-  startedAt: string;
-  finishedAt?: string;
-  inputHash: string;
-  configHash: string;
-  roleVersions: Record<string, string>;
-  providerModels: Record<string, string>;
-};
+
+class ReviewMetadata(TypedDict):
+    started_at: str
+    finished_at: NotRequired[str]
+    input_hash: str
+    config_hash: str
+    role_versions: dict[str, str]
+    provider_models: dict[str, str]
+
+
+class ReviewResult(TypedDict):
+    schema_version: Literal["1.0"]
+    status: Literal["completed", "degraded", "error"]
+    verdict: Literal["approve", "request_changes", "none"]
+    decision_policy: Literal["majority", "unanimous"]
+    overall_impact: Literal["major", "normal"]
+    aggregation_status: Literal["completed", "degraded", "failed"]
+    aggregation_mode: Literal["model", "rule_fallback", "raw_reviewer_results"]
+    summary: str
+    comments: list[ReviewComment]
+    findings: list[AggregatedFinding]
+    reviewer_results: list[ReviewerResult]
+    errors: list[ReviewError]
+    metadata: ReviewMetadata
 ```
 
 ## Verdict Rules
 
-The engine should avoid fail-open behavior.
+The engine should avoid fail-open behavior. Review judgment and execution status are fully separated:
 
-- If all required reviewers complete and no blocking findings exist, verdict may be `approve`.
-- If any required reviewer fails or degrades, the final verdict must not be `approve`.
-- If a required reviewer is missing and no blocking finding exists, use `comment` or `inconclusive` depending on configured strictness.
-- If any reviewer reports a confirmed critical or high blocking issue, default to `request_changes` unless the synthesizer explicitly downgrades it with rationale.
-- If the synthesizer fails, use conservative rule fallback.
-- If no usable reviewer result exists, return `failed` or `inconclusive` in the stable envelope.
+**Individual Reviewer:**
+
+- `status`: `completed | error` — execution status, whether the reviewer finished successfully
+- `verdict`: `approve | request_changes` — review judgment, only valid when `status = completed`
+- `impact`: `major | normal` — impact rating, only valid when `status = completed`
+
+**Overall Review:**
+
+- `status`: `completed | degraded | error` — pipeline status
+- `verdict`: `approve | request_changes | none` — final verdict from the decision policy
+
+Overall `status` semantics:
+
+- `completed`: all required reviewers finished successfully.
+- `degraded`: at least one required reviewer returned `error`, but other reviewers have usable results.
+- `error`: pipeline cannot produce enough usable evidence (all reviewers errored, or input/core failure).
+
+Overall `verdict` semantics:
+
+- `approve`: the decision policy has enough approval.
+- `request_changes`: the decision policy determines the change must be modified.
+- `none`: not enough completed reviewers to form a judgment (`status = error`).
+
+When `status = degraded`, `verdict` still reflects the actual judgment of completed reviewers; consumers should combine `status` with `verdict` to decide whether to trust the result. When `status = error`, `verdict` is `none`.
 
 ## Degraded Operation
 
@@ -320,31 +432,31 @@ Single reviewer/API failure must not immediately fail the entire review.
 
 For each failed reviewer:
 
-- set reviewer `status` to `failed` or `degraded`
-- record `degradationReason`
+- set reviewer `status` to `error`
+- record `error_reason`
 - preserve error metadata in `errors`
 - continue with remaining reviewers
 
-The top-level result must reflect degraded quality. Degraded quality must be visible to both humans and machine consumers.
+The top-level `status` must reflect execution degradation. If at least one reviewer returns `error`, the overall `status` is `degraded`. `verdict` still reflects the actual judgment of completed reviewers; consumers should combine `status` with `verdict` to decide trust.
 
-## Synthesizer Failure Handling
+## Aggregator Failure Handling
 
-The synthesizer is retried according to config:
+The aggregator is retried according to config:
 
-- `synthesizer.maxRetries`
-- `synthesizer.retryBackoffMs`
-- `synthesizer.timeoutMs`
+- `aggregator.max_retries`
+- `aggregator.retry_backoff_ms`
+- `aggregator.timeout_ms`
 
 If it still fails:
 
 - keep the stable `ReviewResult` envelope
-- set `synthesisStatus: "failed"`
-- set `synthesisMode: "raw_reviewer_results"` or `"rule_fallback"`
-- include raw reviewer conclusions inside `reviewerResults`
-- derive a conservative top-level verdict using rule fallback
-- mark `quality: "degraded"`
+- set `aggregation_status: "failed"`
+- set `aggregation_mode: "raw_reviewer_results"` or `"rule_fallback"`
+- include raw reviewer conclusions inside `reviewer_results`
+- preserve aggregated evidence from rule fallback when available
+- let the decision policy derive a verdict based on completed reviewers' judgments
 
-Fallback must never emit free-form raw text as the primary JSON output.
+Fallback must never emit free-form raw text as the primary JSON output. When the aggregator fails, overall `status` is `degraded` or `error`, and `verdict` reflects completed reviewers' judgments.
 
 ## Configuration
 
@@ -356,7 +468,7 @@ Example commands:
 magi-review
 magi-review --staged
 magi-review --base main
-magi-review --json
+magi-review --summary
 ```
 
 Example configuration:
@@ -375,23 +487,27 @@ reviewers:
     role: built-in:adversarial-reviewer
     required: true
     model: gemini-pro
-synthesizer:
+aggregator:
   model: claude-opus
-  maxRetries: 2
-  retryBackoffMs: 1000
-  timeoutMs: 60000
+  max_retries: 2
+  retry_backoff_ms: 1000
+  timeout_ms: 60000
+decision:
+  policy: majority
 execution:
   concurrency: 2
-  reviewerTimeoutMs: 120000
-  maxInputTokens: 120000
-  maxEstimatedCostUsd: 5
+  reviewer_timeout_ms: 120000
+  max_input_tokens: 120000
+  max_estimated_cost_usd: 5
 output:
-  format: text
+  summary: false
 ```
 
 Configuration rules:
 
 - reviewer count must be odd
+- decision policy defaults to `majority`
+- `unanimous` approval can be required by CLI flag, trusted config, or high-impact review mode
 - built-in roles can be overridden only through explicit configuration
 - external role files are loadable
 - CLI flags override local configuration for non-sensitive behavior
@@ -428,7 +544,7 @@ Redaction should be recorded in metadata without exposing the redacted value.
 
 ### Prompt Injection Boundary
 
-Diffs, code comments, commit messages, config text, and task descriptions are untrusted input. Reviewer and synthesizer prompts must clearly separate system instructions from reviewed content.
+Diffs, code comments, commit messages, config text, and task descriptions are untrusted input. Reviewer and aggregator prompts must clearly separate system instructions from reviewed content.
 
 Reviewed content must not be allowed to override reviewer role instructions, output schema, or verdict rules.
 
@@ -446,7 +562,7 @@ Required controls:
 - estimated cost budget
 - partial result preservation
 
-`Promise.all`-style fail-fast behavior is not acceptable for reviewer execution because one failed reviewer must not discard other in-flight results.
+`asyncio.gather`-style fail-fast behavior is not acceptable for reviewer execution because one failed reviewer must not discard other in-flight results.
 
 ## Large Diff Handling
 
@@ -459,7 +575,7 @@ When input exceeds configured limits, the engine should choose an explicit strat
 - summarize lower-risk context while preserving changed hunks
 - ask the caller to narrow scope
 
-The selected strategy must be recorded in metadata. If only part of the diff is reviewed, the result must be degraded and cannot be `approve`.
+The selected strategy must be recorded in metadata. If only part of the diff is reviewed, overall `status` must be `degraded` and `verdict` reflects completed reviewers' judgments.
 
 ## Determinism and Deduplication
 
@@ -467,7 +583,7 @@ The engine should produce stable machine-readable output.
 
 - reviewer results are ordered by configured reviewer order
 - findings have stable IDs derived from normalized location, category, title, and reviewer id
-- synthesized findings have stable IDs derived from merged finding identity
+- aggregated findings have stable IDs derived from merged finding identity
 - duplicate findings are merged by normalized location, category, and semantic title
 - output arrays use deterministic ordering by severity, path, line, and id
 
@@ -480,10 +596,15 @@ CLI defaults:
 - no arguments: review current working tree diff
 - `--staged`: review staged changes
 - `--base <ref>`: review diff against a base ref
-- `--json`: write strict JSON to stdout
+- `--summary`: output human-readable summary
 - stdin patch: review stdin content when data is provided
 
-CLI must avoid hanging when stdin is not actually provided. JSON mode must not write warnings or progress to stdout.
+CLI decision controls:
+
+- default decision policy: majority
+- explicit unanimous mode for high-impact reviews: `--decision-policy unanimous`
+
+Default output is strict JSON to stdout. Logs, warnings, and progress always go to stderr. CLI must avoid hanging when stdin is not actually provided.
 
 ## Testing Strategy
 
@@ -514,11 +635,18 @@ CLI must avoid hanging when stdin is not actually provided. JSON mode must not w
   - malformed model output
   - missing required fields
   - provider-specific diagnostics
-- synthesizer
+- aggregator
   - duplicate finding merge
-  - conflicting reviewer verdicts
-  - failed synthesis retry
+  - reviewer provenance preservation
+  - comment aggregation
+  - error normalization
   - conservative fallback
+- decision policy
+  - majority approval
+  - majority request changes
+  - unanimous approval requirement
+  - reviewer `status = error` causes overall `status = degraded`
+  - pipeline failure or no usable evidence causes overall `status = error`
 - reporter
   - strict stdout JSON
   - stderr warnings
@@ -528,19 +656,20 @@ CLI must avoid hanging when stdin is not actually provided. JSON mode must not w
 
 - stable `ReviewResult` envelope for success
 - stable `ReviewResult` envelope for degraded reviewer failure
-- stable `ReviewResult` envelope for synthesizer fallback
+- stable `ReviewResult` envelope for aggregator fallback
+- all `verdict` values (`approve`, `request_changes`, `none`) and `status` values (`completed`, `degraded`, `error`) combinations
 - schema version compatibility
-- machine parsing of `--json`
+- machine parsing of default JSON output
 
 ### End-to-End Tests
 
 - `magi-review`
 - `magi-review --staged`
 - `magi-review --base main`
-- `magi-review --json`
+- `magi-review --summary`
 - stdin patch input
 - single reviewer failure with degraded conservative verdict
-- synthesizer failure with rule fallback
+- aggregator failure with rule fallback
 
 ## Open Extension Points
 
