@@ -1,0 +1,19 @@
+{
+  "name": "@local/dsh-magi-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MAGI council review: independent briefs, anonymous discussion, sealed ballots and rule-based verdicts for DeepSeek Harness.",
+  "exports": {
+    ".": "./lib/index.js",
+    "./restrict": "./lib/restrict.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["lib", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "docs"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-chat"] }
+  }
+}
