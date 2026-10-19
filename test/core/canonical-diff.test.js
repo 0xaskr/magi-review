@@ -55,6 +55,22 @@ it('slices both old and new exact paths without mutating the input', () => {
   assert.equal(sliceDiffToPaths(parsed, ['new', 'old']).length, 1); assert.deepEqual(sliceDiffToPaths(parsed, ['ne']), []);
   assert.deepEqual(sliceDiffToPaths(parsed, []), []); assert.notEqual(sliceDiffToPaths(parsed, ['new'])[0], parsed.files[0]);
 });
+it('slices directory prefixes, mixed separators and normalizes filters', () => {
+  const text = [
+    'diff --git a/lib/core/a.js b/lib/core/a.js', 'new file mode 100644', '--- /dev/null', '+++ b/lib/core/a.js',
+    '@@ -0,0 +1 @@', '+a', 'diff --git a/lib/host/b.js b/lib/host/b.js', 'new file mode 100644', '--- /dev/null',
+    '+++ b/lib/host/b.js', '@@ -0,0 +1 @@', '+b', 'diff --git a/README.md b/README.md', 'new file mode 100644',
+    '--- /dev/null', '+++ b/README.md', '@@ -0,0 +1 @@', '+c',
+  ].join('\n') + '\n';
+  const parsed = parseUnifiedDiff(text);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib/core']).map(f => f.path), ['lib/core/a.js']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib/core/']).map(f => f.path), ['lib/core/a.js']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib\\core']).map(f => f.path), ['lib/core/a.js']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['./lib/core']).map(f => f.path), ['lib/core/a.js']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib']).map(f => f.path), ['lib/core/a.js', 'lib/host/b.js']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib/core', 'README.md']).map(f => f.path), ['lib/core/a.js', 'README.md']);
+  assert.deepEqual(sliceDiffToPaths(parsed, ['lib/co']), []);
+});
 it('renders externally constructed turn hunks', () => {
   const files = [{ path: 'x', status: 'added', additions: 1, deletions: 0, hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 1, lines: ['+hello'] }], noNewline: true }];
   const text = renderPatch(files); assert.match(text, /--- \/dev\/null/); assert.match(text, /No newline/); assert.equal(parseUnifiedDiff(text).stats.additions, 1);

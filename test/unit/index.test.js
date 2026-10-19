@@ -107,6 +107,19 @@ test('command source overrides a tool dependency default', async t => {
   assert.match(response.text, /base-ref/);
 });
 
+test('tool failure still yields JSON presentation metadata with no identity data', async t => {
+  const r = registry(); t.after(() => r.dispose());
+  apply(r.ctx, {}, { store: {}, runReview: async () => noChanges });
+  const tool = r.tools[0];
+  const value = await tool.execute({}, { agent: {}, signal: undefined });
+  assert.equal(value.ok, false);
+  const meta = tool.output.presentationMeta({}, JSON.parse(JSON.stringify(value)));
+  assert.equal(typeof meta, 'object');
+  assert.equal(meta.unrevealed, true);
+  assert.equal(meta.errorCode, 'NO_CHANGES');
+  assert.deepEqual(meta, JSON.parse(JSON.stringify(meta)));
+});
+
 test('invalid commands, including removed ping, never invoke review or storage', async t => {
   const r = registry(); t.after(() => r.dispose());
   let calls = 0;
