@@ -14,7 +14,8 @@ function registry() {
   return { ctx, tools, commands, dispose() { for (const dispose of disposers.reverse()) dispose?.(); } };
 }
 
-const noChanges = { ok: false, error: { code: 'NO_CHANGES', message: 'No changes to review' } };
+const noChanges = { ok: false, error: { code: 'NO_CHANGES', message: 'No changes to review: the selected target is empty.',
+  hint: '审查已提交改动：target=base-ref 且 base=<改动前的提交>。' } };
 
 test('apply registers only the review tool and command, even with legacy selftest enabled', t => {
   for (const config of [{}, { debug: { selftest: false } }, { debug: { selftest: true } }]) {
@@ -101,7 +102,9 @@ test('command source overrides a tool dependency default', async t => {
   apply(r.ctx, {}, { store: {}, invokedAs: 'tool', runReview: async input => { source = input.deps.invokedAs; return noChanges; } });
   const response = await r.commands[0].handler({ rawInput: 'council' });
   assert.equal(source, 'command');
-  assert.deepEqual(response, { kind: 'error', text: 'NO_CHANGES: No changes to review' });
+  assert.equal(response.kind, 'error');
+  assert.match(response.text, /^NO_CHANGES: No changes to review/);
+  assert.match(response.text, /base-ref/);
 });
 
 test('invalid commands, including removed ping, never invoke review or storage', async t => {
