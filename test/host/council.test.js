@@ -41,7 +41,7 @@ function fake(options = {}) {
   } };
 }
 
-test('council uses one-shot presets, stable termination, anonymous docket and post-decision reveal', async () => {
+test('council uses one-shot reviewer children, stable termination, anonymous docket and post-decision reveal', async () => {
   const f = fake(), { result } = await runCouncil(fixture(), f.deps);
   assert.equal(result.seatBriefs.length, 3); assert.equal(result.discussion.length, 1);
   assert.equal(result.discussion[0].termination.reason, 'positions_stable');
@@ -56,7 +56,9 @@ test('council uses one-shot presets, stable termination, anonymous docket and po
   for (const docket of f.dockets) assert.doesNotMatch(JSON.stringify(docket), /"(?:seatId|perspective|model|provider|childSessionId)"/);
   for (const call of f.calls) {
     assert.equal(call.timeoutMs, call.label.startsWith('magi-brief') ? 240000 : call.label.startsWith('magi-discussion') ? 180000 : 60000);
-    assert.equal(call.preset, call.label.startsWith('magi-discussion') ? 'magi-reviewer-verify' : 'magi-reviewer-readonly');
+    // No plugin-owned preset and no per-seat tool policy in the activation request.
+    assert.equal(Object.hasOwn(call, 'preset'), false);
+    assert.match(call.label, /^magi-(?:brief|discussion|ballot)-[A-Z]$/);
     if (!call.label.startsWith('magi-brief')) assert.doesNotMatch(call.prompt, /builtin:|deepseek-official|deepseek-flash|child-A/);
   }
 });

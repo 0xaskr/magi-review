@@ -1,6 +1,6 @@
 # 安全与匿名边界
 
-适用于 MAGI Review 0.1.0 / DSH 0.2.1-rc.2。MAGI 形成审查证据与规则裁决，不提供独立沙箱，也不保证模型判断正确。配置含义见 [README](../README.md)，未实现的设计能力见 [实现说明](implementation-notes.md)。
+适用于 MAGI Review 0.1.1 / DSH 0.2.1-rc.5。MAGI 形成审查证据与规则裁决，不提供独立沙箱，也不保证模型判断正确。配置含义见 [README](../README.md)，未实现的设计能力见 [实现说明](implementation-notes.md)。
 
 ## 定论前的匿名
 
@@ -16,16 +16,20 @@
 
 ## 权限与工具边界
 
-| 阶段 | preset / 工具 | 强制边界 |
+| 阶段 | 继承工具面与 guard 白名单 | 强制边界 |
 |---|---|---|
-| 独立陈词 | `magi-reviewer-readonly`；read、grep、glob；已有 lsp 可被允许 | preset 不注册 write/edit/shell；guard 拒绝白名单外的工具。 |
-| 允许脚本的讨论 | `magi-reviewer-verify`；只读文件工具 + Windows pwsh / 其他平台 bash | 只允许对应平台 shell 与白名单；继承 DSH 文件/沙箱策略。 |
-| 禁止脚本的讨论 | readonly | 无 shell。 |
-| 秘密表决 | readonly + Host 阶段 guard | descriptor label 为 `magi-ballot-*` 或未绑定时拒绝全部工具，包括 read 和 structured_output；用文本 JSON 回票。 |
+| 独立陈词 | 加入调用者的 mode（agent preset），继承其工具；guard 允许 read、grep、glob、lsp、structured_output | 子会话的写/执行工具在 dispatch 前被拒绝；继承 DSH 文件/沙箱策略。 |
+| 允许脚本的讨论 | 同陈词白名单，guard 额外允许当前平台的 bash（非 Windows）或 pwsh（Windows） | 只允许对应平台 shell 与白名单；继承 DSH 文件/沙箱策略。 |
+| 禁止脚本的讨论 | 白名单同陈词，无 shell | `discussion.allowScripts:false` 时 guard 拒绝 bash/pwsh 与其他非白名单工具。 |
+| 秘密表决 | 无工具白名单 | descriptor label 为 `magi-ballot-*` 或未绑定时拒绝全部工具，包括 read 和 structured_output；用文本 JSON 回票。 |
 
-`lib/restrict.js` 使用 **deny-by-default** guard，按调用时的 wire tool name 决定是否允许；父层后来注册的 write/edit、present、worktree、网络或其他未知工具也默认拒绝。preset 与 guard 是双保险，guard 本身不创建工具。Host 的 `agent/created` 钩子仅针对有 parentSession 且使用 MAGI preset 的子 agent 补装 guard；不会限制用户的根 agent。preset 组合失败时，Host 兜底无法挽救启动。
+`lib/restrict.js` 使用 **deny-by-default** guard，按持久化 `subagent/descriptor` label 与调用时的 wire tool name 决定是否允许；父层后来注册的 write/edit、present、worktree、网络或其他未知工具也默认拒绝。`lib/index.js` 的 `agent/created` 钩子只对 `origin:'subagent'` 的子会话安装 guard；label 不属于 `magi-(brief|discussion|ballot)-*` 的子会话（其他插件启动的子 agent）不处理，带 parentSession lineage 但 `origin` 不是 `subagent` 的 fork 根会话也不处理。label 不可读或尚未绑定时 fail-closed，拒绝全部工具。guard 本身不创建工具，也不能修复组合阶段加载失败。
 
-委托子 agent 继承父会话文件策略与沙箱，审批由 DSH runtime 固定为 `never`；无法以人工批准突破继承权限。**never 不是只读权限**：父会话若允许工作区写入，verify shell 仍可能写文件。persona 要求只读验证是行为约束，guard 只验证工具名，不解析 shell 程序语义。工作区护栏用于事后发现变更，不会撤销变更。
+**工具边界的结构保证变弱了。** 旧实现用两套 reviewer preset 在注册层结构性省略写/执行工具；现在子会话加入调用者的 mode，完整工具面（包括 write/edit/shell）可能在 reviewer 的 schema 和模型可见列表中，运行期再由 guard 按阶段名称拒绝。guard 是硬边界，但这是执行期 deny-by-default，不是注册期能力隔离；模型仍可能看到比阶段允许列表更宽的工具 schema，任何绕开 guard 的宿主级路径都需单独审查。
+
+模型选择输入来自受信任的 profile 与会话状态：reviewer 池取 DSH 子 agent 模型选择设置的 `allowedModels`，书记官路由取会话 `modelSelection` 投影或事件折叠的结果。显式 `provider`/`model` 要求精确匹配允许路由列表：设置未启用返回 `MODEL_SELECTION_DISABLED`，路由不在列表返回 `MODEL_ROUTE_NOT_ALLOWED`；第三方 provider 仍受 `security.allowThirdPartyProviders` 约束。选择合法路由不代表响应可信，模型路由不是安全边界。
+
+委托子 agent 继承父会话文件策略与沙箱，审批由 DSH runtime 固定为 `never`；无法以人工批准突破继承权限。**never 不是只读权限**：父会话若允许工作区写入，讨论阶段的 shell 仍可能写文件。persona 要求只读验证是行为约束，guard 只验证工具名，不解析 shell 程序语义。工作区护栏用于事后发现变更，不会撤销变更。
 
 Host 的 Git 快照由 `node:child_process.execFile` 直接调用，属于受信任插件代码，不走子 agent 的工具审批。使用参数数组、`--end-of-options`/`--`、固定只读命令，并禁用 ext-diff/textconv。读取未跟踪内容时校验真实祖先路径；最终符号链接记录链接文本，不跟随到仓库外。这不能替代 DSH 对其他 read/shell 调用的路径策略，也不消除路径检查与读取之间的竞争。
 
@@ -62,12 +66,13 @@ Host 在提示组装前扫描快照、意图与请求；进入后续讨论/纪�
 ## 已知残余风险
 
 1. 平台 catalog、侧栏与日志可发现子会话；未知身份暗示不能完全净化。
-2. verify shell 的只读意图不是系统只读保证；网络/外部副作用取决于继承沙箱，护栏仅事后检测部分工作区变更。
+2. 讨论阶段 shell 的只读意图不是系统只读保证；网络/外部副作用取决于继承沙箱，护栏仅事后检测部分工作区变更。
 3. 模式脱敏会漏检、误伤；直接工具读取不经过 Host 扫描，第三方 provider 默认允许且无首次提示。
 4. 合法 JSON、finding 位置和命令摘要不证明证据真实；prompt 注入和模型从众仍可能影响内容。
 5. 运行时同路由重试、首轮票回退可能遗漏后续证据；必须结合 degradedReasons 复核。
 6. token/费用是局部估算，无法保证美元硬上限；超时清理失败/延迟仍受平台生命周期约束。
 7. 本地报告与 DSH 日志未加密，当前默认 profile namespace 不自动隔离，cache 尚无跨进程协调。
 8. Windows 符号链接安全用例因权限跳过；DSH rc API、权限钩子时序和真实 GUI 仍需部署验收。
+9. reviewer 子 agent 继承调用者的 mode：调用者 mode 不提供文件读取工具时，reviewer 只能按 patch 评审；继承的工具 schema 可能比阶段允许列表更宽，实际约束依赖运行期 guard。
 
 对应自动测试与待验项目见 [verification.md](verification.md)。

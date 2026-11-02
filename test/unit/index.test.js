@@ -25,8 +25,11 @@ test('apply registers only the review tool and command, even with legacy selftes
     assert.deepEqual(r.commands.map(command => command.name), ['magi-review']);
     assert.equal(r.tools[0].parameters.additionalProperties, false);
     assert.equal(r.tools[0].parameters.properties.__invokedAs, undefined);
+    assert.deepEqual(r.tools[0].parameters.properties.provider.type, 'string');
+    assert.deepEqual(r.tools[0].parameters.properties.model.type, 'string');
     assert.match(r.tools[0].description, /untrusted evidence/);
     assert.match(r.tools[0].description, /insufficient is not approval/);
+    assert.match(r.tools[0].description, /subagent model-selection/);
   }
 });
 
@@ -48,6 +51,7 @@ for (const [input, expected] of [
   ['--base "feature one" --focus "security, tests, ,"', { base: 'feature one', focus: ['security', 'tests'] }],
   ["--report 'report with spaces'", { report: 'report with spaces' }],
   ['--focus "$(echo injected),`literal`,a;b"', { focus: ['$(echo injected)', '`literal`', 'a;b'] }],
+  ['council --provider newapi-inc --model gpt-6-astra', { mode: 'council', provider: 'newapi-inc', model: 'gpt-6-astra' }],
 ]) {
   test(`parseCommandArgs: ${input || '(defaults)'}`, () => assert.deepEqual(parseCommandArgs(input), expected));
 }
@@ -63,6 +67,8 @@ for (const [input, pattern] of [
   ['--base "unclosed', /引号未闭合/],
   ["--focus 'unclosed", /引号未闭合/],
   ['--patch change.diff', /V1 命令不读取 patch 文件/],
+  ['--provider newapi-inc', /--provider 与 --model 必须成对提供/],
+  ['--model gpt-6-astra', /--provider 与 --model 必须成对提供/],
 ]) {
   test(`parseCommandArgs rejects ${input}`, () => assert.throws(() => parseCommandArgs(input), pattern));
 }

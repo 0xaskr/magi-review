@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readRecentEvents, currentTurn, latestUserRequest, latestAssistantText, latestWorkspaceChangesSeq, buildIntentContext, lastTurnWindow } from '../../lib/host/session-context.js';
+import { readRecentEvents, currentTurn, latestUserRequest, latestAssistantText, latestWorkspaceChangesSeq,
+  buildIntentContext, lastTurnWindow, currentModelSelection, projectedModelSelection } from '../../lib/host/session-context.js';
 
 const event = (type, data) => ({ type, data });
 const message = text => ({ message: { content: [{ type: 'text', text }] } });
@@ -139,3 +140,24 @@ test('turn/end remains authoritative without turn/start and derived messages sup
   assert.equal(currentTurn(compacted), 2);
   assert.deepEqual(buildIntentContext(compacted), { turn: 2, task: 'second', claims: 'second claim' });
 });
+
+test('the session model comes from the modelSelection projection, then the same log fold', () => {
+  const s = session([
+    event('request/header', { header: { config: { provider: 'used-provider', model: 'used-model' } } }),
+    event('model/selection', { provider: 'next-provider', model: 'next-model' }),
+  ]);
+  // A registered projection is authoritative.
+  const projections = { stateOf: () => ({ lastUsed: { provider: 'used-provider', model: 'used-model' },
+    pending: { provider: 'next-provider', model: 'next-model' } }) };
+  assert.deepEqual(projectedModelSelection(s, projections), { provider: 'next-provider', model: 'next-model' });
+  assert.deepEqual(currentModelSelection(s, projections), { provider: 'next-provider', model: 'next-model' });
+  assert.equal(projectedModelSelection(s, { stateOf: () => { throw Error('gone'); } }), undefined);
+  // Without a projection the log fold reproduces it: pending wins over the used route.
+  assert.deepEqual(currentModelSelection(s), { provider: 'next-provider', model: 'next-model' });
+  const settled = session([event('model/selection', { provider: 'p', model: 'm' }),
+    event('request/header', { header: { config: { provider: 'p', model: 'm' } } })]);
+  assert.deepEqual(currentModelSelection(settled), { provider: 'p', model: 'm' });
+  assert.equal(currentModelSelection(session([])), undefined);
+  assert.equal(currentModelSelection(null), undefined);
+});
+

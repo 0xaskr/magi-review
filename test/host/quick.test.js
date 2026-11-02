@@ -20,7 +20,7 @@ test('quick runs only independent readonly brief + ballot, without minutes/discu
   const f = setup(), { result } = await runQuick(f.input, f.deps);
   assert.equal(f.calls.length, 6); assert.deepEqual(result.discussion, []); assert.equal(result.minutes, null);
   assert.equal(result.digest.mode, 'quick'); assert.equal(result.digest.verdict, 'approve');
-  for (const request of f.calls) assert.equal(request.preset, 'magi-reviewer-readonly');
+  for (const request of f.calls) assert.equal(Object.hasOwn(request, 'preset'), false);
   const aBallot = f.calls.find(c => c.label === 'magi-ballot-A');
   assert.match(aBallot.prompt, /PRIVATE_A/); assert.doesNotMatch(aBallot.prompt, /PRIVATE_B|PRIVATE_C/);
 });

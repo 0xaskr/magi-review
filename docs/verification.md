@@ -1,10 +1,21 @@
 # 验证记录
 
-记录日期：2026-10-18（最终更新 2026-10-19 00:20，北京时间）。实现版本 0.1.0，DSH 兼容基线 0.2.1-rc.2。
+记录日期：2026-10-18（最终更新 2026-11-02，北京时间）。当前实现版本 0.1.1，DSH 兼容基线 0.2.1-rc.5。0.1.0 / DSH 0.2.1-rc.2 的记录保留在第 1–3 节，结果按原始基线理解；0.1.1 的新证据见「0.1.1（2026-11-02）」一节。
 
 本记录区分三类证据：**自动化测试**（可重复）、**真实 DSH 运行**（本机 desktop profile，真实模型与沙箱）、**Host 侧渲染模拟**（真实结果数据 + Client 模块 VM 执行）。GUI 目视验收仍属未完成项，见文末清单。
 
-## 1. 自动化测试
+## 0.1.1（2026-11-02）
+
+本版记录覆盖 reviewer preset 移除（reviewer 子 agent 继承调用者 mode，改由 `lib/restrict.js` 按阶段 descriptor label 的 deny-by-default guard 限制工具）与新增模型选择（DSH 子 agent 模型选择池、显式 `provider`/`model`、书记官会话模型）。
+
+| 项目 | 结果 |
+|---|---|
+| 自动化测试 | `node --test "test/core/*.test.js" "test/host/*.test.js"` 加 `node --test "test/unit/*.test.js"` 合计 **397 项，0 失败**；覆盖 core/host/unit 三个测试目录。 |
+| 语法检查 | 改动模块通过 `node --check`。 |
+| 新增覆盖 | `test/host/restrict.test.js` 覆盖三阶段白名单、lazy guard、未绑定 label fail-closed、MAGI 之外 label 放行；`test/host/{llm-json,session-context,orchestrator}.test.js` 覆盖模型池、显式路由校验与 `INVALID_ARGS`。 |
+| 未执行 | **未执行真实多席评审、GUI 三灯卡手工验收，以及 DSH 0.2.1-rc.5 下的安装/重启复验。** |
+
+## 1. 自动化测试（0.1.0 / DSH 0.2.1-rc.2 历史记录）
 
 环境：Windows，Node.js v24.19.0。仓库根目录执行：
 
@@ -38,7 +49,7 @@ Get-ChildItem lib -Recurse -Filter *.js | Select-String -Pattern "magi_ping"
 | 纪要输入压缩与重试、短输出/截断触发 compact 重试、模板回退诊断 | `test/host/council.test.js`（M2f 后 356 项基线，最终 383 项） |
 | 工具/命令注册、参数解析、来源绑定、报告查询、非法输入 | `test/unit/index.test.js`（25 项） |
 
-## 2. 真实 DSH 运行（desktop profile，真实模型）
+## 2. 真实 DSH 运行（desktop profile，真实模型；0.1.0 / DSH 0.2.1-rc.2 历史记录）
 
 全部为本机真实 `magi_review` 调用（3 席，显式 `target=patch`，reviewer 子 agent 由 DSH 真实启动）。报告位于 `~/.dsh/storages/magi-review/default/reviews/<reportId>.json`。
 
@@ -60,7 +71,7 @@ Get-ChildItem lib -Recurse -Filter *.js | Select-String -Pattern "magi_ping"
 
 历史记录中两次 `minutes_invalid` 的根因：纪要被 3000 output token 上限截断（模型侧输出包含大量与 3 轮讨论相关的 JSON），解析失败。M2f 已把第一次上限提到 6000、压缩纪要输入（135170 → 19423 字符，compact 6686 字符），并对截断/短输出做 compact 重试；最终一轮验证为 `ok`。
 
-## 3. 三灯卡 Host 侧渲染模拟
+## 3. 三灯卡 Host 侧渲染模拟（0.1.0 / DSH 0.2.1-rc.2 历史记录）
 
 无法从 Host 侧截图 GUI，因此用真实报告 `27afcae3` 的 `buildCardPayload(result)` 输出送入 `lib/client.js` 的 VM 执行（React stub），验证 Client 模块的归一化与渲染逻辑：
 
@@ -73,7 +84,7 @@ Get-ChildItem lib -Recurse -Filter *.js | Select-String -Pattern "magi_ping"
 
 ## 4. 手工验收清单
 
-已由自动化/真实运行覆盖：
+已由自动化/真实运行覆盖（0.1.0 / DSH 0.2.1-rc.2 历史记录）：
 
 - [x] desktop profile 已安装 bundle；`magi_review` 工具与 `/magi-review` 命令为唯一入口，旧调试工具 `magi_ping` 不可调用（工具清单 + 单元测试）。
 - [x] 工具调用路径不再等待人工确认（`human_confirmation_missing` 立即降级，最终 council 运行 313 秒内完成 3 轮）。
@@ -89,9 +100,18 @@ Get-ChildItem lib -Recurse -Filter *.js | Select-String -Pattern "magi_ping"
 - [ ] 讨论轮次上限时命令路径的“继续讨论/直接表决”询问交互与超时文案。
 - [ ] 匿名性残余风险：DSH 子会话仍可通过 catalog/会话列表被发现（平台限制，见 `docs/security.md`）。
 
+0.1.1 新增待验项（全部未勾选）：
+
+- [ ] DSH 新建任务的 mode 选择器不再出现 MAGI reviewer preset，`cordis.patch.yml` 只有 `magi-review` 一个 Host row。
+- [ ] reviewer 子 agent 继承调用者当前 mode 的工具面；调用者 mode 不提供文件读取工具时按 patch 评审。
+- [ ] 三个阶段 guard 的运行期行为：陈词/讨论只放行白名单，讨论按平台放行 bash/pwsh（`discussion.allowScripts:false` 时无 shell），表决拒绝全部工具。
+- [ ] DSH 子 agent 模型选择设置启用时 reviewer 池生效、池首条路由成为默认路由；设置关闭时回退 `models.defaultRoute`。
+- [ ] 书记官使用父会话当前运行的模型；显式 `provider`/`model` 与 `--provider/--model` 的配对及 `MODEL_SELECTION_DISABLED` / `MODEL_ROUTE_NOT_ALLOWED` / `INVALID_ARGS` 行为。
+
 ## 5. 未验证项
 
 1. **Windows 符号链接**：2 项用例因 EPERM skip；隔离性未在本机验证。
 2. **真实异构 provider 故障回退**：跨路由（deepseek-official / deepseek-account / openrouter）分配已实现并容错，但未触发真实 auth/限流/路由消失后的自动换路由；当前策略是分配时排除不可用路由，运行失败按失败矩阵降级。
 3. **成本基准**：`metadata.usage` 中的 input/output token 是字符数估算；只有书记官/纪要的 LLM 调用会计入真实 usage，子 agent 侧未采集账单数据。
 4. **GUI 与平台行为**：见第 4 节未完成清单。
+5. **0.1.1 的运行期边界**：`subagent/descriptor` label 的实际时序、guard 在真实子会话中的拦截、DSH 子 agent 模型选择池与 rc.5 安装/重启均未复验；397 项自动测试不替代这些部署验收。

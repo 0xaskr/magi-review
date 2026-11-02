@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { listAvailableRoutes, resolveDefaultRoute, callLlmJson, callLlmJsonValidated, estimateTokens } from '../../lib/host/llm-json.js';
+import { listAvailableRoutes, resolveDefaultRoute, callLlmJson, callLlmJsonValidated, estimateTokens, subagentModelPool } from '../../lib/host/llm-json.js';
 
 const request = { provider: 'p', model: 'm', system: 'system', user: 'task' };
 const routes = { listProviders: () => [{ id: 'p', name: 'Provider' }, { id: 'broken' }], listModels: id => {
@@ -131,4 +131,17 @@ test('a stream factory resolving after timeout closes its iterator without dispa
   assert.equal(result.code, 'LLM_TIMEOUT');
   publish({ [Symbol.asyncIterator]() { return this; }, next() { assert.fail('late stream must not be consumed'); }, return: () => { closed(); return { done: true }; } });
   await cleanup;
+});
+
+test('the subagent model-selection pool is normalized, deduplicated and absent when disabled', () => {
+  const current = routes => ({ current: () => routes });
+  assert.deepEqual(subagentModelPool(current({ enabled: true, allowedModels: [{ provider: 'p', model: 'm' }] })),
+    [{ provider: 'p', model: 'm' }]);
+  assert.deepEqual(subagentModelPool(current({ enabled: true, allowedModels: [
+    { provider: ' p ', model: 'm' }, { provider: 'p', model: 'm' }, { provider: 'q', model: 'n' }, { provider: 3 }] })),
+  [{ provider: 'p', model: 'm' }, { provider: 'q', model: 'n' }]);
+  assert.equal(subagentModelPool(current({ enabled: false, allowedModels: [{ provider: 'p', model: 'm' }] })), undefined);
+  assert.equal(subagentModelPool(current({ enabled: true, allowedModels: [] })), undefined);
+  assert.equal(subagentModelPool({ current() { throw Error('settings unavailable'); } }), undefined);
+  assert.equal(subagentModelPool(undefined), undefined);
 });

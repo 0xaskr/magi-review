@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runSeatTurn, extractProtocol } from '../../lib/host/seat.js';
 
-const options = { parentAgent: { id: 'parent' }, preset: 'readonly', provider: 'p', model: 'm', prompt: 'review', timeoutMs: 1000, label: 'A' };
+const options = { parentAgent: { id: 'parent' }, provider: 'p', model: 'm', prompt: 'review', timeoutMs: 1000, label: 'magi-brief-A' };
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 
 test('seat activation uses caller delivery and returns text, structured and child identity', async () => {
@@ -13,8 +13,11 @@ test('seat activation uses caller delivery and returns text, structured and chil
   const result = await runSeatTurn(subagents, { ...options, cwd: '/workspace', outputSchema });
   assert.equal(received.provider, 'spawn');
   assert.equal(received.delivery, 'caller');
-  assert.deepEqual(received.request, { parent: options.parentAgent, agentPreset: 'readonly', agentOptions: { provider: 'p', model: 'm' },
+  assert.deepEqual(received.request, { parent: options.parentAgent, agentOptions: { provider: 'p', model: 'm' },
     prompt: [{ type: 'text', text: 'review' }], cwd: '/workspace', outputSchema });
+  // No plugin-owned agent preset: the child joins the caller's mode revision.
+  assert.equal(Object.hasOwn(received.request, 'agentPreset'), false);
+  assert.equal(received.label, 'magi-brief-A');
   assert.equal(result.ok, true);
   assert.equal(result.text, 'first\nlast');
   assert.deepEqual(result.structured, { ok: true });

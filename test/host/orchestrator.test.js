@@ -303,22 +303,49 @@ test('command parsing, execution, report lookup and missing report are wired', a
   assert.equal((await r.commands[0].handler({ rawInput: 'ping' })).kind, 'error');
 });
 
-test('readonly ballot dispatch guard denies all tools while brief reads and verify shell remain available', () => {
-  for (const [label, preset, forbidden, allowed] of [
-    ['magi-ballot-A', 'magi-reviewer-readonly', ['read', 'grep', 'structured_output', 'pwsh'], []],
-    ['magi-brief-A', 'magi-reviewer-readonly', ['write', 'edit', 'pwsh'], ['read', 'grep']],
-    ['magi-discussion-A', 'magi-reviewer-verify', ['write', 'edit'], ['read', process.platform === 'win32' ? 'pwsh' : 'bash']],
+test('reviewer stage guard bounds inherited tools by the durable descriptor label', () => {
+  for (const [label, configRaw, forbidden, allowed] of [
+    ['magi-ballot-A', {}, ['read', 'grep', 'structured_output', 'pwsh'], []],
+    ['magi-brief-A', {}, ['write', 'edit', 'pwsh'], ['read', 'grep']],
+    ['magi-discussion-A', {}, ['write', 'edit'], ['read', process.platform === 'win32' ? 'pwsh' : 'bash']],
+    ['magi-discussion-A', { discussion: { allowScripts: false } }, ['write', 'edit', 'pwsh'], ['read', 'grep']],
   ]) {
     const r = registry(), guards = []; let onCreated;
-    const agent = { id: 'child', session: { header: { parentSession: 'parent', agentPreset: preset }, seq: 1,
+    const agent = { id: 'child', session: { header: { parentSession: 'parent', origin: 'subagent' }, seq: 1,
       snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label } }] } };
     const child = { ctx: { effect: fn => fn(), tools: { guard: fn => { guards.push(fn); return () => {}; } } } };
-    r.ctx.on = (_event, fn) => { onCreated = fn; return () => {}; };
+    r.ctx.on = (event, fn) => { if (event === 'agent/created') onCreated = fn; return () => {}; };
     r.ctx.get = name => name === 'agents' ? { get: () => child } : undefined;
-    apply(r.ctx); onCreated({ agent });
+    apply(r.ctx, configRaw); onCreated({ agent });
     for (const name of forbidden) assert.ok(guards.some(guard => guard({ name })), `${label} must deny ${name}`);
     for (const name of allowed) assert.ok(guards.every(guard => guard({ name }) === undefined), `${label} must allow ${name}`);
+    // A child this plugin did not start keeps its inherited tools.
+    guards.length = 0;
+    const other = { id: 'other', session: { header: { parentSession: 'parent', origin: 'subagent' }, seq: 1,
+      snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label: 'review-helper' } }] } };
+    onCreated({ agent: other });
+    assert.ok(guards.length > 0);
+    assert.ok(guards.every(guard => guard({ name: 'write' }) === undefined));
   }
+});
+
+test('a forked root session carries lineage but stays outside the reviewer guard', () => {
+  const r = registry(), guards = []; let onCreated;
+  const agent = { id: 'fork', session: { header: { parentSession: 'source', isSeeded: true }, seq: 1 } };
+  r.ctx.on = (event, fn) => { if (event === 'agent/created') onCreated = fn; return () => {}; };
+  r.ctx.get = name => name === 'agents' ? { get: () => ({ ctx: { effect: fn => fn(), tools: { guard: fn => { guards.push(fn); return () => {}; } } } }) } : undefined;
+  apply(r.ctx); onCreated({ agent });
+  assert.equal(guards.length, 0);
+});
+
+test('an unreadable reviewer stage fails closed instead of inheriting caller tools', () => {
+  const r = registry(), guards = []; let onCreated;
+  const agent = { id: 'child', session: { header: { parentSession: 'parent', origin: 'subagent' }, seq: 1 } };
+  const child = { ctx: { effect: fn => fn(), tools: { guard: fn => { guards.push(fn); return () => {}; } } } };
+  r.ctx.on = (event, fn) => { if (event === 'agent/created') onCreated = fn; return () => {}; };
+  r.ctx.get = name => name === 'agents' ? { get: () => child } : undefined;
+  apply(r.ctx); onCreated({ agent });
+  assert.ok(guards.some(guard => guard({ name: 'read' })));
 });
 
 test('third-party policy filters clerk routes and rejects conflicting pins before any model', async () => {
@@ -328,4 +355,49 @@ test('third-party policy filters clerk routes and rejects conflicting pins befor
   const g = fixture(); g.deps.configRaw.security = { allowThirdPartyProviders: false };
   g.deps.configRaw.clerk = { model: { provider: 'other', model: 'other-model' } };
   assert.equal((await runReview(g.input)).ok, false); assert.equal(g.calls.seats.length, 0);
+});
+
+test('reviewer seats default to the subagent model-selection routes while the clerk keeps the session model', async () => {
+  const f = fixture();
+  f.deps.subagentModelPool = () => [{ provider: 'other', model: 'other-model' }];
+  f.deps.currentModelSelection = () => ({ provider: 'deepseek-official', model: 'deepseek-flash' });
+  const response = await runReview(f.input);
+  assert.equal(response.ok, true);
+  const models = [...new Set(response.result.metadata.models.map(model => `${model.provider}/${model.model}`))];
+  assert.deepEqual(models, ['other/other-model']);
+  // The clerk is outside the reviewer pool on purpose: it runs the session's model.
+  assert.deepEqual(f.calls.clerk[0].config.clerk.model, { provider: 'deepseek-official', model: 'deepseek-flash' });
+  assert.deepEqual(f.calls.clerk[0].config.models.defaultRoute, { provider: 'other', model: 'other-model' });
+});
+
+test('explicit reviewer route must be an allowed and available subagent model route', async () => {
+  const ok = fixture();
+  ok.deps.subagentModelPool = () => [{ provider: 'other', model: 'other-model' }, { provider: 'deepseek-official', model: 'deepseek-flash' }];
+  ok.input.args = { provider: 'other', model: 'other-model' };
+  const response = await runReview(ok.input);
+  assert.equal(response.ok, true);
+  assert.deepEqual([...new Set(response.result.metadata.models.map(model => `${model.provider}/${model.model}`))], ['other/other-model']);
+
+  const notAllowed = fixture();
+  notAllowed.deps.subagentModelPool = () => [{ provider: 'deepseek-official', model: 'deepseek-flash' }];
+  notAllowed.input.args = { provider: 'other', model: 'other-model' };
+  assert.equal((await runReview(notAllowed.input)).error.code, 'MODEL_ROUTE_NOT_ALLOWED');
+
+  const disabled = fixture();
+  disabled.input.args = { provider: 'other', model: 'other-model' };
+  assert.equal((await runReview(disabled.input)).error.code, 'MODEL_SELECTION_DISABLED');
+
+  const unpaired = fixture();
+  unpaired.input.args = { provider: 'other' };
+  const invalid = await runReview(unpaired.input);
+  assert.equal(invalid.ok, false); assert.equal(invalid.error.code, 'INVALID_ARGS');
+  assert.equal(unpaired.calls.seats.length, 0);
+});
+
+test('a configured reviewer pool with no available route fails instead of silently switching models', async () => {
+  const f = fixture();
+  f.deps.subagentModelPool = () => [{ provider: 'missing-provider', model: 'missing-model' }];
+  const response = await runReview(f.input);
+  assert.equal(response.ok, false); assert.equal(response.error.code, 'MODEL_ROUTE_UNAVAILABLE');
+  assert.equal(f.calls.seats.length, 0);
 });
