@@ -43,12 +43,12 @@ test('disabled entry points stay disabled with legacy selftest enabled', t => {
 for (const [input, expected] of [
   ['', {}],
   ['  quick  ', { mode: 'quick' }],
-  ['council --base main', { mode: 'council', base: 'main' }],
-  ['quick --staged --seats 5 --focus security,tests --detail full',
-    { mode: 'quick', target: 'staged', seats: 5, focus: ['security', 'tests'], detail: 'full' }],
-  ['--target working-tree --seats 7 --detail digest', { target: 'working-tree', seats: 7, detail: 'digest' }],
+  ['council --base main', { mode: 'council', base: 'main', target: 'branch' }],
+  ['quick --staged --seats 5 --focus security,tests',
+    { mode: 'quick', target: 'staged', seats: 5, focus: ['security', 'tests'] }],
+  ['--target working-tree --seats 7', { target: 'working-tree', seats: 7 }],
   ['--report 4741cc06-a1e4-4db5-a8df-7f717306f9fe', { report: '4741cc06-a1e4-4db5-a8df-7f717306f9fe' }],
-  ['--base "feature one" --focus "security, tests, ,"', { base: 'feature one', focus: ['security', 'tests'] }],
+  ['--base "feature one" --focus "security, tests, ,"', { base: 'feature one', target: 'branch', focus: ['security', 'tests'] }],
   ["--report 'report with spaces'", { report: 'report with spaces' }],
   ['--focus "$(echo injected),`literal`,a;b"', { focus: ['$(echo injected)', '`literal`', 'a;b'] }],
   ['council --provider newapi-inc --model gpt-6-astra', { mode: 'council', provider: 'newapi-inc', model: 'gpt-6-astra' }],
@@ -58,15 +58,15 @@ for (const [input, expected] of [
 
 for (const [input, pattern] of [
   ['--unknown value', /未知参数/],
-  ['toString value', /未知参数/],
-  ['__proto__ value', /未知参数/],
-  ['ping', /未知参数/],
+  ['--toString value', /未知参数/],
+  ['--__proto__ value', /未知参数/],
+  ['--detail full', /已从命令移除/],
   ['--base', /缺少参数/],
   ['--seats --staged', /缺少参数/],
   ['--report ""', /缺少参数/],
   ['--base "unclosed', /引号未闭合/],
   ["--focus 'unclosed", /引号未闭合/],
-  ['--patch change.diff', /V1 命令不读取 patch 文件/],
+  ['--patch change.diff', /命令不读取 patch 文件/],
   ['--provider newapi-inc', /--provider 与 --model 必须成对提供/],
   ['--model gpt-6-astra', /--provider 与 --model 必须成对提供/],
 ]) {
@@ -126,12 +126,12 @@ test('tool failure still yields JSON presentation metadata with no identity data
   assert.deepEqual(meta, JSON.parse(JSON.stringify(meta)));
 });
 
-test('invalid commands, including removed ping, never invoke review or storage', async t => {
+test('invalid commands never invoke review or storage', async t => {
   const r = registry(); t.after(() => r.dispose());
   let calls = 0;
   apply(r.ctx, { debug: { selftest: true } }, { runReview: async () => { calls++; return noChanges; },
     store: { getReview: async () => { calls++; return { ok: false }; } } });
-  for (const rawInput of ['ping', '--unknown', '--base "unclosed']) {
+  for (const rawInput of ['--help --staged', '--unknown', '--base "unclosed']) {
     assert.equal((await r.commands[0].handler({ rawInput })).kind, 'error');
   }
   assert.equal(calls, 0);

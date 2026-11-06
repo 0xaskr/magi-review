@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-magi-review",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "MAGI council review: independent briefs, anonymous discussion, sealed ballots and rule-based verdicts for DeepSeek Harness.",
@@ -27,6 +27,7 @@
     "@deepseek-ai/dsh-subagent": "^0.2.1-rc.5",
     "@deepseek-ai/dsh-tool-subagent": "^0.2.1-rc.5",
     "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-questions": "^0.2.1-rc.5",
     "@deepseek-ai/dsh-working-directory": "^0.2.1-rc.5",
     "@deepseek-ai/dsh-workspace-changes": "^0.2.1-rc.5"
   },
@@ -34,6 +35,7 @@
     "@deepseek-ai/dsh-agent-default-model": { "optional": true },
     "@deepseek-ai/dsh-session-projection": { "optional": true },
     "@deepseek-ai/dsh-tool-subagent": { "optional": true },
+    "@deepseek-ai/dsh-user-questions": { "optional": true },
     "@deepseek-ai/dsh-working-directory": { "optional": true },
     "@deepseek-ai/dsh-workspace-changes": { "optional": true }
   },

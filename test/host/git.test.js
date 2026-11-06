@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile, unlink, rmdir, symlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { runGit, detectRepo, snapshotReview, statusFingerprint, listChangedPaths } from '../../lib/host/git.js';
+import { runGit, detectRepo, snapshotReview, statusFingerprint, listChangedPaths, listReviewBranches, listReviewCommits } from '../../lib/host/git.js';
 import { hashDiff } from '../../lib/core/canonical-diff.js';
 import { git, repository, temporary } from './helpers.js';
 
@@ -62,6 +62,245 @@ test('staged and base-ref use frozen OIDs and distinguish staged from working co
   assert.equal((await snapshotReview({ cwd: root, target: 'base-ref', base: '--output=bad' })).error.code, 'GIT_ERROR');
   const rename = 'diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n';
   assert.deepEqual(listChangedPaths(await snapshotReview({ cwd: root, target: 'patch', patchText: rename, paths: ['old.txt'] })), ['new.txt']);
+});
+
+test('branch snapshots compare merge-base to captured HEAD and exclude base-only and dirty changes', async t => {
+  const root = await repository(t); if (!root) return;
+  await git(root, 'branch', '-M', 'main');
+  const ancestor = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-qb', 'feature');
+  await writeFile(path.join(root, 'feature.txt'), 'feature committed\n', 'utf8');
+  await git(root, 'add', 'feature.txt');
+  await git(root, 'commit', '-qm', 'feature change');
+  const head = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'main');
+  await writeFile(path.join(root, 'base-only.txt'), 'only on base\n', 'utf8');
+  await git(root, 'add', 'base-only.txt');
+  await git(root, 'commit', '-qm', 'base change');
+  const base = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'feature');
+  await writeFile(path.join(root, 'tracked.txt'), 'dirty staged\n', 'utf8');
+  await git(root, 'add', 'tracked.txt');
+  await writeFile(path.join(root, 'feature.txt'), 'dirty unstaged\n', 'utf8');
+  await writeFile(path.join(root, 'untracked.txt'), 'dirty untracked\n', 'utf8');
+  const status = await git(root, 'status', '--porcelain=v1');
+  const result = await snapshotReview({ cwd: root, target: 'branch', base: 'main' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.baseRef, 'main');
+  assert.equal(result.baseOid, ancestor);
+  assert.equal(result.headOid, head);
+  assert.notEqual(result.baseOid, base);
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.untracked, []);
+  assert.deepEqual(listChangedPaths(result), ['feature.txt']);
+  assert.match(result.canonicalPatch, /\+feature committed/);
+  assert.doesNotMatch(result.canonicalPatch, /base-only|dirty/);
+  assert.equal(await git(root, 'status', '--porcelain=v1'), status);
+  assert.equal(await git(root, 'rev-parse', 'HEAD'), head);
+  const legacy = await snapshotReview({ cwd: root, target: 'base-ref', base: 'main' });
+  assert.equal(legacy.baseOid, base);
+  assert.match(legacy.canonicalPatch, /base-only/);
+  assert.match(legacy.canonicalPatch, /dirty/);
+});
+
+test('commit snapshots include only the selected commit and ignore later commits and dirty content', async t => {
+  const root = await repository(t); if (!root) return;
+  const parent = await git(root, 'rev-parse', 'HEAD');
+  await writeFile(path.join(root, 'tracked.txt'), 'selected commit\n', 'utf8');
+  await git(root, 'add', 'tracked.txt');
+  await git(root, 'commit', '-qm', 'selected');
+  const selected = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'tag', '-am', 'annotated selected commit', 'selected-tag');
+  await writeFile(path.join(root, 'later.txt'), 'later commit\n', 'utf8');
+  await git(root, 'add', 'later.txt');
+  await git(root, 'commit', '-qm', 'later');
+  await writeFile(path.join(root, 'tracked.txt'), 'dirty staged\n', 'utf8');
+  await git(root, 'add', 'tracked.txt');
+  await writeFile(path.join(root, 'tracked.txt'), 'dirty unstaged\n', 'utf8');
+  await writeFile(path.join(root, 'untracked.txt'), 'dirty untracked\n', 'utf8');
+  const result = await snapshotReview({ cwd: root, target: 'commit', commit: 'selected-tag' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.baseOid, parent);
+  assert.equal(result.headOid, selected);
+  assert.equal(result.commitOid, selected);
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.untracked, []);
+  assert.deepEqual(listChangedPaths(result), ['tracked.txt']);
+  assert.match(result.canonicalPatch, /-before\n\+selected commit/);
+  assert.doesNotMatch(result.canonicalPatch, /later|dirty/);
+  await git(root, 'symbolic-ref', 'HEAD', 'refs/heads/unborn');
+  const orphan = await snapshotReview({ cwd: root, target: 'commit', commit: selected });
+  assert.equal(orphan.error, undefined);
+  assert.equal(orphan.degradedReasons, undefined);
+  assert.equal(orphan.patchHash, result.patchHash);
+});
+
+test('shallow boundaries retain the actual first parent instead of appearing as root commits', async t => {
+  const root = await repository(t); if (!root) return;
+  const parent = await git(root, 'rev-parse', 'HEAD');
+  await writeFile(path.join(root, 'tracked.txt'), 'shallow change\n', 'utf8');
+  await git(root, 'add', 'tracked.txt');
+  await git(root, 'commit', '-qm', 'shallow tip');
+  const oid = await git(root, 'rev-parse', 'HEAD');
+  const shallowPath = path.resolve(root, await git(root, 'rev-parse', '--git-path', 'shallow'));
+  await writeFile(shallowPath, oid + '\n', 'utf8');
+  const result = await snapshotReview({ cwd: root, target: 'commit', commit: oid });
+  assert.equal(result.error, undefined);
+  assert.equal(result.baseOid, parent);
+  assert.deepEqual(listChangedPaths(result), ['tracked.txt']);
+  assert.match(result.canonicalPatch, /-before\n\+shallow change/);
+});
+
+test('root commit snapshots compare against the empty tree in the repository object format', async t => {
+  for (const format of ['sha1', 'sha256']) await t.test(format, async t => {
+    const root = await temporary(t);
+    const initialized = await runGit(root, ['init', '-q', `--object-format=${format}`]);
+    if (initialized.code === 'ENOENT' || format === 'sha256' && initialized.code !== 0) {
+      t.skip('Git executable or SHA-256 object format is unavailable'); return;
+    }
+    assert.equal(initialized.code, 0, initialized.stderr);
+    await git(root, 'config', 'user.name', 'Host Test');
+    await git(root, 'config', 'user.email', 'host-test@example.invalid');
+    await writeFile(path.join(root, 'root.txt'), 'root content\n', 'utf8');
+    await git(root, 'add', 'root.txt');
+    await git(root, 'commit', '-qm', 'root');
+    const oid = await git(root, 'rev-parse', 'HEAD');
+    const objectsBefore = await git(root, 'count-objects', '-v');
+    const result = await snapshotReview({ cwd: root, target: 'commit', commit: oid });
+    assert.equal(result.error, undefined);
+    assert.equal(result.headOid, oid);
+    assert.equal(result.commitOid, oid);
+    assert.equal(result.baseOid.length, format === 'sha256' ? 64 : 40);
+    assert.equal(result.baseOid, await git(root, 'hash-object', '-t', 'tree', '--stdin'));
+    assert.equal(await git(root, 'count-objects', '-v'), objectsBefore);
+    assert.deepEqual(listChangedPaths(result), ['root.txt']);
+    assert.equal(result.files[0].status, 'added');
+    assert.match(result.canonicalPatch, /\+root content/);
+  });
+});
+
+test('merge commit snapshots use the first parent', async t => {
+  const root = await repository(t); if (!root) return;
+  await git(root, 'branch', '-M', 'main');
+  await git(root, 'checkout', '-qb', 'feature');
+  await writeFile(path.join(root, 'feature.txt'), 'feature side\n', 'utf8');
+  await git(root, 'add', 'feature.txt');
+  await git(root, 'commit', '-qm', 'feature');
+  const secondParent = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'checkout', '-q', 'main');
+  await writeFile(path.join(root, 'main.txt'), 'main side\n', 'utf8');
+  await git(root, 'add', 'main.txt');
+  await git(root, 'commit', '-qm', 'main');
+  const firstParent = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'merge', '--no-ff', '-qm', 'merge feature', 'feature');
+  const result = await snapshotReview({ cwd: root, target: 'commit', commit: 'HEAD' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.baseOid, firstParent);
+  assert.notEqual(result.baseOid, secondParent);
+  assert.equal(result.commitOid, await git(root, 'rev-parse', 'HEAD'));
+  assert.deepEqual(listChangedPaths(result), ['feature.txt']);
+  assert.doesNotMatch(result.canonicalPatch, /main side/);
+});
+
+test('branch and commit refs fail as ordinary snapshot errors without option interpretation', async t => {
+  const root = await repository(t); if (!root) return;
+  for (const target of ['branch', 'commit']) {
+    const key = target === 'branch' ? 'base' : 'commit';
+    for (const ref of ['missing-ref', '--output=bad', '--help', 'HEAD\0bad', 'HEAD^{tree}']) {
+      const result = await snapshotReview({ cwd: root, target, [key]: ref });
+      assert.equal(result.error?.code, 'GIT_ERROR', `${target}: ${ref}`);
+      assert.equal(result.error.stage, 'input');
+      assert.equal(result.empty, false);
+      assert.equal(result.coverage.partial, true);
+    }
+    for (const ref of [undefined, '', ' ', 7]) {
+      const result = await snapshotReview({ cwd: root, target, [key]: ref });
+      assert.equal(result.error?.code, 'SNAPSHOT_ERROR');
+      assert.equal(result.empty, false);
+    }
+  }
+  const unborn = await repository(t, false); if (!unborn) return;
+  assert.equal((await snapshotReview({ cwd: unborn, target: 'branch', base: 'main' })).error?.code, 'GIT_ERROR');
+  assert.equal((await snapshotReview({ cwd: unborn, target: 'commit', commit: 'HEAD' })).error?.code, 'GIT_ERROR');
+});
+
+test('review branch choices include local and remote refs, prioritize main/master, and remain bounded', async t => {
+  const root = await repository(t); if (!root) return;
+  await git(root, 'branch', '-M', 'feature');
+  await git(root, 'branch', 'main');
+  await git(root, 'branch', 'master');
+  const head = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'update-ref', 'refs/remotes/origin/main', head);
+  await git(root, 'update-ref', 'refs/remotes/origin/master', head);
+  await git(root, 'update-ref', 'refs/remotes/origin/feature', head);
+  await git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+  for (let i = 0; i < 35; i++) await git(root, 'branch', `aaa-${String(i).padStart(2, '0')}`);
+  const choices = await listReviewBranches({ cwd: root });
+  assert.equal(choices.length, 30);
+  assert.deepEqual(choices.slice(0, 4).map(choice => choice.ref), [
+    'refs/heads/main', 'refs/remotes/origin/main', 'refs/heads/master', 'refs/remotes/origin/master',
+  ]);
+  assert.equal(new Set(choices.map(choice => choice.ref)).size, choices.length);
+  const all = await listReviewBranches({ cwd: root, limit: 100 });
+  assert.deepEqual(all.filter(choice => choice.current), [{ ref: 'refs/heads/feature', current: true }]);
+  assert.ok(all.some(choice => choice.ref === 'refs/remotes/origin/feature'));
+  assert.ok(all.every(choice => choice.ref !== 'refs/remotes/origin/HEAD'));
+  assert.deepEqual(await listReviewBranches({ cwd: root, limit: 2 }), choices.slice(0, 2));
+  assert.deepEqual(await listReviewBranches({ cwd: root, limit: 0 }), []);
+  assert.deepEqual(await listReviewBranches({ cwd: root, limit: -1 }), []);
+  assert.deepEqual(await listReviewBranches({ cwd: root, limit: 10000 }), all);
+  for (let i = 35; i < 105; i++) await git(root, 'branch', `aaa-${String(i).padStart(3, '0')}`);
+  assert.equal((await listReviewBranches({ cwd: root, limit: 10000 })).length, 100);
+  await git(root, 'checkout', '--detach', '-q');
+  assert.ok((await listReviewBranches({ cwd: root, limit: 100 })).every(choice => !choice.current));
+  const empty = await repository(t, false); if (!empty) return;
+  assert.deepEqual(await listReviewBranches({ cwd: empty }), []);
+});
+
+test('review commit choices list recent HEAD history and handle unborn HEAD without reading worktree changes', async t => {
+  const root = await repository(t); if (!root) return;
+  const recent = [];
+  for (let i = 1; i <= 22; i++) {
+    const subject = i === 22 ? 'last subject\twith 中文' : `commit ${i}`;
+    await git(root, 'commit', '--allow-empty', '-qm', subject);
+    recent.unshift({ oid: await git(root, 'rev-parse', 'HEAD'), subject });
+  }
+  await writeFile(path.join(root, 'untracked.txt'), 'not committed\n', 'utf8');
+  const choices = await listReviewCommits({ cwd: root });
+  assert.deepEqual(choices, recent.slice(0, 20));
+  assert.deepEqual(await listReviewCommits({ cwd: root, limit: 2 }), recent.slice(0, 2));
+  assert.deepEqual(await listReviewCommits({ cwd: root, limit: 0 }), []);
+  assert.equal((await listReviewCommits({ cwd: root, limit: 10000 })).length, 23);
+  await git(root, 'checkout', '--detach', '-q', 'HEAD~2');
+  assert.deepEqual(await listReviewCommits({ cwd: root, limit: 2 }), recent.slice(2, 4));
+  for (let i = 0; i < 82; i++) await git(root, 'commit', '--allow-empty', '-qm', `extra ${i}`);
+  assert.equal((await listReviewCommits({ cwd: root, limit: 10000 })).length, 100);
+  const empty = await repository(t, false); if (!empty) return;
+  assert.deepEqual(await listReviewCommits({ cwd: empty }), []);
+  const outside = await temporary(t);
+  await assert.rejects(listReviewCommits({ cwd: outside }), { code: 'REPO_UNAVAILABLE' });
+  await assert.rejects(listReviewBranches({ cwd: outside }), { code: 'GIT_ERROR' });
+});
+
+test('branch/commit snapshots and selection lists preserve cancellation before and during Git reads', async t => {
+  const root = await repository(t); if (!root) return;
+  const controller = new AbortController(); controller.abort();
+  for (const target of ['branch', 'commit']) {
+    const result = await snapshotReview({ cwd: root, target, base: 'HEAD', commit: 'HEAD', signal: controller.signal });
+    assert.equal(result.error?.code, 'SNAPSHOT_ABORTED');
+    assert.equal(result.empty, false);
+    const inFlight = new AbortController();
+    const pending = snapshotReview({ cwd: root, target, base: 'HEAD', commit: 'HEAD', signal: inFlight.signal });
+    inFlight.abort();
+    assert.equal((await pending).error?.code, 'SNAPSHOT_ABORTED');
+  }
+  for (const list of [listReviewBranches, listReviewCommits]) {
+    await assert.rejects(list({ cwd: root, signal: controller.signal }), { code: 'SNAPSHOT_ABORTED' });
+    const inFlight = new AbortController();
+    const pending = list({ cwd: root, signal: inFlight.signal });
+    inFlight.abort();
+    await assert.rejects(pending, { code: 'SNAPSHOT_ABORTED' });
+  }
 });
 
 test('unborn HEAD snapshots contain staged additions and current untracked bytes', async t => {

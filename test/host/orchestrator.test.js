@@ -81,12 +81,41 @@ test('explicit confirmation timeout, exhaustion policy and input cap survive fro
   assert.equal((await runReview(f.input)).ok, true);
 });
 
-test('explicit target wins over base, auto base chooses base-ref, and paths/focus are forwarded', async () => {
-  const f = fixture(); f.input.args = { target: 'staged', base: 'main', paths: ['src/a.js'], focus: ['tests'] };
+test('scope conflicts fail, auto base retains base-ref, and paths/focus/instructions are forwarded', async () => {
+  const conflict = fixture(); conflict.input.args = { target: 'staged', base: 'main' };
+  assert.equal((await runReview(conflict.input)).error.code, 'INVALID_ARGS');
+  assert.equal(conflict.calls.snapshots.length, 0);
+  const f = fixture(); f.input.args = { target: 'staged', paths: ['src/a.js'], focus: ['tests'], instructions: '检查权限回归' };
   assert.equal((await runReview(f.input)).ok, true);
   assert.equal(f.calls.snapshots[0].target, 'staged'); assert.deepEqual(f.calls.clerk[0].intent.focus, ['tests']);
+  assert.equal(f.calls.clerk[0].intent.reviewInstructions, '检查权限回归');
+  assert.ok(f.calls.seats.some(seat => seat.prompt.includes('检查权限回归')));
   const g = fixture(); g.input.args = { base: 'main' }; await runReview(g.input);
   assert.equal(g.calls.snapshots[0].target, 'base-ref');
+});
+
+test('branch and commit targets reach the clerk protocol, snapshot and report without scope fallback', async () => {
+  for (const target of ['branch', 'commit']) {
+    const f = fixture();
+    f.input.args = target === 'branch' ? { target, base: 'main' } : { target, commit: 'HEAD~1' };
+    if (target === 'commit') f.snapshot.commitOid = 'a'.repeat(40);
+    delete f.deps.runClerk;
+    const get = f.input.ctx.get;
+    f.input.ctx.get = name => name === 'llm' ? { async *stream(request) {
+      assert.ok(request.messages[0].content[0].text.includes(target));
+      yield { type: 'text-delta', text: JSON.stringify({ targetKind: target, confidence: 'high', rationale: 'frozen',
+        modelAssignment: ['architect', 'engineer', 'adversary'].map(seatId => ({ seatId, provider: 'deepseek-official', model: 'deepseek-flash', assignmentReason: 'available' })) }) };
+    } } : get(name);
+    const response = await runReview(f.input);
+    assert.equal(response.ok, true); assert.equal(response.result.scope.target.kind, target);
+    assert.equal(f.calls.snapshots.length, 1); assert.equal(f.calls.snapshots[0].target, target);
+    assert.ok(!response.result.degradedReasons.includes('clerk_fallback'));
+    if (target === 'commit') {
+      assert.equal(f.calls.snapshots[0].commit, 'HEAD~1');
+      assert.equal(response.result.digest.target.commitOid, 'a'.repeat(40));
+      assert.ok(renderCommandMarkdown(response.result).includes('a'.repeat(40)));
+    }
+  }
 });
 
 test('auto clean tree selects turn, including zero changes sequence', async () => {
@@ -98,11 +127,22 @@ test('auto clean tree selects turn, including zero changes sequence', async () =
   assert.equal(f.calls.snapshots[1].changesSeq, 0); assert.equal(f.calls.snapshots[1].sessionId, 'session');
 });
 
-test('unavailable explicit turn falls back to working tree with degradation', async () => {
+test('unavailable explicit turn fails without expanding the selected scope', async () => {
   const f = fixture(); f.input.args.target = 'turn';
   const response = await runReview(f.input);
-  assert.equal(response.ok, true); assert.equal(f.calls.snapshots[0].target, 'working-tree');
-  assert.ok(response.result.digest.degradedReasons.includes('turn_unavailable'));
+  assert.equal(response.ok, false); assert.equal(response.error.code, 'TURN_UNAVAILABLE');
+  assert.equal(f.calls.snapshots.length, 0); assert.equal(f.calls.seats.length, 0);
+});
+
+test('an expired turn snapshot is unavailable, while an empty valid turn remains NO_CHANGES', async () => {
+  for (const expired of [true, false]) {
+    const f = fixture(); f.input.args.target = 'turn'; f.deps.latestWorkspaceChangesSeq = () => 0;
+    f.deps.snapshotReview = async args => { f.calls.snapshots.push(args); return { kind: 'turn', empty: true, files: [], canonicalPatch: '',
+      ...(expired ? { degradeReason: 'turn_unavailable' } : {}) }; };
+    assert.equal((await runReview(f.input)).error.code, expired ? 'TURN_UNAVAILABLE' : 'NO_CHANGES');
+    assert.deepEqual(f.calls.snapshots.map(call => call.target), ['turn']);
+    assert.equal(f.calls.seats.length, 0);
+  }
 });
 
 test('clerk fallback propagates to digest/decision even when all votes approve', async () => {
@@ -288,9 +328,9 @@ test('tool registration projects digest and final metadata, catches failures', a
 });
 
 test('command parsing, execution, report lookup and missing report are wired', async () => {
-  assert.deepEqual(parseCommandArgs('quick --base "feature one" --seats 5 --focus security,tests --detail full'),
-    { mode: 'quick', base: 'feature one', seats: 5, focus: ['security', 'tests'], detail: 'full' });
-  assert.throws(() => parseCommandArgs('--patch change.diff'), /V1/); assert.throws(() => parseCommandArgs('--base'), /缺少/);
+  assert.deepEqual(parseCommandArgs('quick --base "feature one" --seats 5 --focus security,tests'),
+    { mode: 'quick', base: 'feature one', target: 'branch', seats: 5, focus: ['security', 'tests'] });
+  assert.throws(() => parseCommandArgs('--patch change.diff'), /命令不读取/); assert.throws(() => parseCommandArgs('--base'), /缺少/);
   assert.throws(() => parseCommandArgs('--base "unclosed'), /引号/);
   const f = fixture(), response = await runReview(f.input), r = registry(); let observed;
   apply(r.ctx, { command: { name: 'custom-review' } }, { runReview: async input => { observed = input.args; return response; },
@@ -300,7 +340,7 @@ test('command parsing, execution, report lookup and missing report are wired', a
   assert.deepEqual(observed, { mode: 'quick', target: 'staged' });
   assert.equal((await r.commands[0].handler({ rawInput: '--report known' })).kind, 'success');
   assert.equal((await r.commands[0].handler({ rawInput: '--report missing' })).kind, 'error');
-  assert.equal((await r.commands[0].handler({ rawInput: 'ping' })).kind, 'error');
+  assert.equal((await r.commands[0].handler({ rawInput: '--unknown' })).kind, 'error');
 });
 
 test('reviewer stage guard bounds inherited tools by the durable descriptor label', () => {

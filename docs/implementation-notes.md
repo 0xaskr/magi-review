@@ -1,17 +1,18 @@
-# 实现说明（0.1.1）
+# 实现说明（0.2.0）
 
-依据 [DSH 原生设计 v1.1](superpowers/specs/2026-10-18-magi-review-dsh-native-design-zh.md)，以当前源码为实现事实。兼容基线 DSH 0.2.1-rc.5；该版本的 `tools.register` / `tools.guard`（含 `output.schema` / `render` / `presentationMeta` / `timeoutMs`）、`commands.register`、`subagents.startActivation` 规格、`agent/created`、`subagent/descriptor`、`llm` 的 `listProviders` / `listModels` / `stream`、session 的 `snapshotEvents` / `seq` 与 `modelSelection` 投影、client 的 `tool.call.toolview` 均已复核并与之匹配。配置和用法见 [README](../README.md)，威胁边界见 [安全说明](security.md)。
+依据 [DSH 原生设计 v1.1](superpowers/specs/2026-10-18-magi-review-dsh-native-design-zh.md)，以当前源码为实现事实。兼容基线 DSH 0.2.1-rc.5（未变）；该版本的 `tools.register` / `tools.guard`（含 `output.schema` / `render` / `presentationMeta` / `timeoutMs`）、`commands.register`、`subagents.startActivation` 规格、`agent/created`、`subagent/descriptor`、`llm` 的 `listProviders` / `listModels` / `stream`、session 的 `snapshotEvents` / `seq` 与 `modelSelection` 投影、client 的 `tool.call.toolview` 均已复核并与之匹配。0.2.0 的交互式命令还依赖 DSH `userQuestions.ask`；Git 侧使用只读的 `merge-base`、`cat-file commit`（读取原始第一父提交，避免浅克隆边界被误判为根）、`hash-object -t tree`（空树）与有界 `for-each-ref`/`log` 列表。配置和用法见 [README](../README.md)，威胁边界见 [安全说明](security.md)。
 
 ## 模块地图与数据流
 
 | 模块 | 职责 |
 |---|---|
-| `lib/index.js` | 注册工具/命令；绑定调用来源；保存卡片投影；处理报告查询；在 `agent/created` 时为 `origin:'subagent'` 子会话安装 reviewer guard。 |
+| `lib/index.js` | 注册工具/命令；绑定调用来源；处理 `--help`/`--report`；无参数时调用 `prepareCommandReview` 进入范围问答；保存卡片投影；在 `agent/created` 时为 `origin:'subagent'` 子会话安装 reviewer guard。 |
+| `lib/host/command.js` | 命令参数解析、help 文本、无参数范围问答（未提交/基线分支/单次提交/自定义要求 + 取消）；不调用模型。 |
 | `lib/client.js` | 宿主 `tool.call.toolview` 中的 `magi_review` 卡片，匿名占位与最终揭示态。 |
 | `cordis.patch.yml` / `lib/restrict.js` | 单一 `magi-review` Host row（不注册 reviewer preset）；按持久化 descriptor label 执行 deny-by-default 的阶段白名单 guard。 |
 | `lib/host/config.js` | 默认值、可信配置校验、模型目录约束、pin 与同构判定。 |
-| `lib/host/git.js` / `session-context.js` | 只读 Git/turn/patch 快照、哈希、覆盖率；最近用户意图与交付声称。 |
-| `lib/host/orchestrator.js` | 参数、来源、路由、脱敏、diff 预算、clerk、引擎、工作区护栏、存储；构造卡片与命令 Markdown。 |
+| `lib/host/git.js` / `session-context.js` | 只读 Git 能力：working-tree/staged/base-ref/branch/commit/turn/patch 快照、有界本地分支/提交列表、哈希、覆盖率；最近用户意图与交付声称。 |
+| `lib/host/orchestrator.js` | 参数与范围校验、`instructions`→`reviewInstructions`、来源、路由、脱敏、diff 预算、clerk、引擎、工作区护栏、存储；构造卡片与命令 Markdown。 |
 | `lib/host/clerk.js` / `llm-json.js` | 会前范围说明与模型分配；流式文本聚合、JSON 调用/校验、目录及默认路由解析。 |
 | `lib/host/prompts.js` / `protocol.js` | nonce 数据分区、阶段提示、JSON 字段白名单、seatRef/round 绑定与纪要约束。 |
 | `lib/host/seat.js` | 一次 activation 的创建、结果等待、超时、取消、dispose；迟到 activation 也清理。 |
@@ -21,7 +22,7 @@
 
 ```mermaid
 flowchart TD
-  E[工具 / 命令] --> S[冻结快照 + 会话意图 + 脱敏 + diff 预算]
+  E[工具 / 命令] --> S[冻结快照 + 会话意图（含 reviewInstructions）+ 脱敏 + diff 预算]
   S --> C[clerk 范围说明 / 模型分配]
   C --> B[briefs 独立陈词（只读白名单）]
   B --> D[匿名 docket]
@@ -49,6 +50,9 @@ quick 在 reveal 后直接进入护栏和存储；失败阶段的处理见下表
 6. **文件存储。** 避免 storageDomain/zod 的运行时包导入。`store.js` 先写同目录临时文件，再以 hard link 原子发布不可变报告，已存在的 reportId 不覆盖；可变索引/cache 通过 rename 更新。进程内写队列串行，索引可扫描报告重建；跨进程 cache 更新仍未协调。
 7. **Git 使用 `node:child_process.execFile`。** 用参数数组执行只读命令，避免依赖尚未稳定的 `ctx.subprocess` 调用形态及 shell 字符串拼接。差异读取关闭 ext-diff/textconv，记录 OID/patchHash 和未跟踪文件原字节摘要。讨论中的 shell 则仍走 DSH 工具与父会话权限。
 8. **双输出通道。** 模型文本走小摘要；卡片走 `presentationMeta` 的白名单 JSON。DSH 深拷贝会破坏对象身份，入口按 reportId 缓存投影（最多 128 项），full 结果还可自行重建投影。UI 无中间 projection，因此运行中只显示匿名占位。
+9. **命令交互与范围语义（0.2.0）。** 无参数调用先通过 DSH `userQuestions.ask` 选择四项范围（未提交、基线分支、单次提交、自定义要求），另有取消；取消或问答不可用时不调用模型。带参数或自然语言要求时直接执行，未指定范围默认 `working-tree`，不再默认 `auto`。`--base` 改为分支评审：比较基线分支与捕获 HEAD 的 merge-base 到 HEAD，不含未提交改动；旧的“引用与工作区比较”保留为 `--target base-ref --base <ref>`。`--commit` 比较提交与其第一父提交，根提交相对空树。`--staged`、`--target auto|turn|working-tree` 作为高级选项保留。范围选项互斥，重复参数、冲突范围、`--report`/`--help` 与评审参数组合均报错。
+10. **自然语言要求不改变冻结范围。** 命令行中的非参数文本（或 `--` 之后的文字）写入 `intent.reviewInstructions`，随会话意图进入 clerk 与各席 brief 提示；范围始终由参数或交互选择决定，要求文本不能扩大或缩小已冻结的 diff。`--detail` 只从命令移除（命令固定输出报告），工具保留 `detail`，完整 JSON 通过 reportId 获取。
+11. **显式 turn 失败不静默换范围。** 显式 `target=turn` 在会话没有回合快照（或读取失败）时返回 `TURN_UNAVAILABLE`/快照错误，不再退回工作区；只有 `auto` 保持旧的降级回退。这样调用者显式选择的语义不会被悄悄替换。
 
 ## 模型选择
 
@@ -67,6 +71,10 @@ reviewer 席位的默认路由来自 DSH 的子 agent 模型选择设置（`ctx.
 | 目录内按成本/异构分配 → reviewer 路由优先取 DSH 子 agent 模型选择池；书记官跟随会话模型 | 用户已通过 DSH 设置表达子 agent 模型偏好，插件不应越过该策略；书记官是记录者，与会话同路由更自然。 | 设置支持按角色/工具细分路由后，再考虑 reviewer 与 clerk 的独立映射。 |
 | 同席连续讨论/表决 → 每阶段新子 agent，文本 JSON 最多重试一次 | 冷恢复的父通知无法可靠维持秘密表决。 | 平台支持持久化 caller delivery 和稳定续聊结果通道后，再验证复用；保留一次性回退。 |
 | 书记官选范围 → Host 先冻结范围，clerk 解释且不得扩张 | 显式参数、快照哈希和脱敏预算需要确定输入。 | 增加“候选范围提案 → 校验 → 冻结”的独立流程，确保模型不能扩大可信权限。 |
+| 命令 `--base` 旧语义（引用与工作区）→ 0.2.0 分支评审（merge-base → 捕获 HEAD，不含未提交） | 对齐 Codex `/review` 的心智模型；避免把用户脏工作区混入分支评审。 | 旧语义保留为 `--target base-ref --base <ref>`；继续在帮助与迁移说明中强调差异。 |
+| 无参数交互依赖 DSH `userQuestions.ask` → 非交互入口要求显式参数 | 子 agent、委派入口不能可靠弹出问答；静默替用户选择范围的风险更高。 | 平台提供稳定交互通道或来源标识后，再评估非交互默认；当前直接报错并提示参数。 |
+| `--commit` 相对第一父 → 合并提交只与第一父比较，不另生成相对第二父的差异 | 包含合并结果相对第一父新增的内容，包括从第二父合入的变更；不使用 combined diff。 | 需要按每个父提交分别审查时可传 patch；未来可增加显式父提交选择。 |
+| 命令 `--detail` 移除 → 工具保留 `detail` | 命令固定输出 Markdown 报告，避免参数组合膨胀；完整 JSON 可按 reportId 读取。 | 若确有命令侧需求，单列输出参数与截断预算。 |
 | 按视角裁剪完整文件上下文 → 各席同一份按文件边界裁剪的 diff，视角由提示区分 | 保证共同证据基础，先解决大工作区超时和覆盖记录。 | 增加可审计的 context manifest、文件包/分批计划及覆盖合并。 |
 | 原设计 brief/round/ballot/total 为 120/90/30/600 秒 → 240/180/60/1800 秒；diff 预算 16000 tokens | 既有真实运行暴露超时，M2d 已调整默认值。 | 建立 3/5/7 席成本与时延基线后再调参。 |
 | 人工确认统一默认 300 秒 → orchestrator 未显式配置时 120 秒；仅命令询问 | 工具路径无法可靠获取人工回答，等待拖延评审。config.js 尚保留旧 300 秒默认。 | 统一归一化与编排默认值；平台具备稳定交互后重新评估工具询问。 |
@@ -92,7 +100,10 @@ reviewer 席位的默认路由来自 DSH 的子 agent 模型选择设置（`ctx.
 |---|---|---|
 | 非法参数/配置、无差异 | 返回 `ok:false`；参数类型/配对错误为 `INVALID_ARGS`，无差异为 `NO_CHANGES`，不调用 reviewer。 | `orchestrator.js: validateArgs/runReview`，`config.js: validateConfig` |
 | 模型选择设置关闭、路由不在允许列表、允许路由都不可用 | 显式 `provider`/`model` 分别返回 `MODEL_SELECTION_DISABLED` / `MODEL_ROUTE_NOT_ALLOWED`；池内无可用路由或显式路由当前不可用返回 `MODEL_ROUTE_UNAVAILABLE`；均不发起 reviewer 调用。 | `orchestrator.js: runReview`，`llm-json.js: subagentModelPool` |
-| turn 不可用、读取失败或内容不全 | 缺服务/事件或快照 error 时回退工作区；空不可用快照可能返回 NO_CHANGES；缺文件标 partial。 | `orchestrator.js: runReview`，`git.js: turnSnapshot/snapshotReview` |
+| 显式 `target=turn` 无回合快照或读取失败 | 返回 `TURN_UNAVAILABLE` 或该快照错误，不退回工作区。 | `orchestrator.js: runReview`，`git.js: turnSnapshot` |
+| `auto` 的 turn 回退不可用 | 降级到 `working-tree`，记录 `turn_unavailable`；空快照可能返回 `NO_CHANGES`；缺文件标 partial。 | `orchestrator.js: runReview`，`git.js: turnSnapshot/snapshotReview` |
+| 命令无参数问答取消或入口不可用 | 取消返回“已取消”，不调用模型；入口无法问答时报错并提示显式参数，不静默选择范围。 | `command.js: prepareCommandReview`，`index.js: handler` |
+| `branch`/`commit` 快照读取失败或 ref 无效 | 返回快照/Git 错误，不伪造 clean 结果；`branch` 需要已提交 HEAD，`commit` 需要可解析提交。 | `git.js: snapshotReview` |
 | 输入脱敏失败 | `REDACTION_FAILED`，停止且不调用模型。 | `orchestrator.js: redact/runReview` |
 | 书记官调用/JSON 无效 | 使用冻结范围和确定性模型分配，`clerk_fallback`，有效证据仍可裁决。 | `clerk.js: runClerk`，`orchestrator.js: runReview` |
 | 单席陈词失败、非法响应、超时 | 最多两次尝试且受总截止时间约束；该席 error，其余继续；`reviewer_error:<seatRef>`，可能不足 quorum。 | `council.js: turn/briefs`，`seat.js: runSeatTurn`，`protocol.js` |

@@ -1,10 +1,23 @@
 # 验证记录
 
-记录日期：2026-10-18（最终更新 2026-11-02，北京时间）。当前实现版本 0.1.1，DSH 兼容基线 0.2.1-rc.5。0.1.0 / DSH 0.2.1-rc.2 的记录保留在第 1–3 节，结果按原始基线理解；0.1.1 的新证据见「0.1.1（2026-11-02）」一节。
+记录日期：2026-10-18（最终更新 2026-11-06，北京时间）。当前实现版本 0.2.0，DSH 兼容基线 0.2.1-rc.5（未变）。0.1.0 / DSH 0.2.1-rc.2 与 0.1.1 / DSH 0.2.1-rc.5 的记录保留为历史，结果按各自原始基线理解；0.2.0 的新验证见「0.2.0（2026-11-06）」一节。
 
 本记录区分三类证据：**自动化测试**（可重复）、**真实 DSH 运行**（本机 desktop profile，真实模型与沙箱）、**Host 侧渲染模拟**（真实结果数据 + Client 模块 VM 执行）。GUI 目视验收仍属未完成项，见文末清单。
 
-## 0.1.1（2026-11-02）
+## 0.2.0（2026-11-06）
+
+本版为命令交互迁移（Codex `/review` 风格）：无参数问答选择范围、`--base` 改为分支评审（merge-base → 捕获 HEAD）、新增 `--commit`/`--help` 与自然语言要求、命令移除 `--detail`；工具新增 `branch`/`commit` 目标与 `instructions` 字段，显式 `target=turn` 无快照返回 `TURN_UNAVAILABLE`。
+
+| 项目 | 状态 |
+|---|---|
+| 自动化测试 | `node --test test/core/*.test.js test/host/*.test.js test/unit/*.test.js`：**461 项通过，0 失败、0 跳过**。Linux，Node.js 24。 |
+| 重点覆盖 | 菜单四条路径、取消/跳过/ASK_CANCELLED、无问答服务、范围互斥、自然语言与字面尾部、分支分叉/脏工作区排除、单次/root/merge/shallow 提交、SHA-1/SHA-256、书记官协议与报告范围、失效回合快照。 |
+| 语法与发布包 | 改动入口 `node --check`、`git diff --check` 通过；`npm pack --dry-run --ignore-scripts` 确认 43 个发布文件，含新增 command 模块、Host/Client、patch、locale 与 icon。 |
+| 接口检查 | Inspect 核对 commands、userQuestions.ask、workingDirectory；DSH Client 的取消错误码 ASK_CANCELLED 已覆盖。工具参数 schema 从 749 增至 1088 字符，按字符/3 粗估约增加 113 token（非模型 tokenizer 实测，非完整系统提示）。 |
+| 真实 DSH 命令交互与 GUI 目视（四项选择、取消、分支/提交列表、Markdown 渲染） | 未执行；自动测试使用受控问答与模型替身，不声称 GUI 或真实多席评审已验收。 |
+| GitHub 安装 | 发布后通过插件管理器更新；实时应用结果以管理器返回值为准。 |
+
+## 0.1.1（2026-11-02，历史记录）
 
 本版记录覆盖 reviewer preset 移除（reviewer 子 agent 继承调用者 mode，改由 `lib/restrict.js` 按阶段 descriptor label 的 deny-by-default guard 限制工具）与新增模型选择（DSH 子 agent 模型选择池、显式 `provider`/`model`、书记官会话模型）。
 
@@ -108,10 +121,22 @@ Get-ChildItem lib -Recurse -Filter *.js | Select-String -Pattern "magi_ping"
 - [ ] DSH 子 agent 模型选择设置启用时 reviewer 池生效、池首条路由成为默认路由；设置关闭时回退 `models.defaultRoute`。
 - [ ] 书记官使用父会话当前运行的模型；显式 `provider`/`model` 与 `--provider/--model` 的配对及 `MODEL_SELECTION_DISABLED` / `MODEL_ROUTE_NOT_ALLOWED` / `INVALID_ARGS` 行为。
 
+0.2.0 新增待验项（全部未勾选）：
+
+- [ ] 无参数 `/magi-review` 出现四项范围选择与取消；取消不调用模型。
+- [ ] 分支选择来自本地有界列表，也可输入分支/引用；范围为 merge-base → 当前 HEAD，不包含未提交改动。
+- [ ] 提交选择来自本地有界列表，也可输入 SHA/引用；范围为该提交相对第一父提交，根提交相对空树。
+- [ ] 带参数或自然语言要求直接执行；未指定范围默认 `working-tree`；要求写入 `intent.reviewInstructions` 且不改变冻结范围。
+- [ ] `--base` 为 `branch` 语义；`--target base-ref --base <ref>` 保留旧“引用与工作区比较”语义。
+- [ ] `--detail` 在命令上报明确错误但工具保留；`--report`/`--help` 只能单独使用；`--help` 不调用模型。
+- [ ] 显式 `--target turn` 无快照返回 `TURN_UNAVAILABLE`；`auto` 仍会回退工作区。
+- [ ] 当前入口无法显示问答时给出显式参数提示，且不发起评审。
+
 ## 5. 未验证项
 
 1. **Windows 符号链接**：2 项用例因 EPERM skip；隔离性未在本机验证。
 2. **真实异构 provider 故障回退**：跨路由（deepseek-official / deepseek-account / openrouter）分配已实现并容错，但未触发真实 auth/限流/路由消失后的自动换路由；当前策略是分配时排除不可用路由，运行失败按失败矩阵降级。
 3. **成本基准**：`metadata.usage` 中的 input/output token 是字符数估算；只有书记官/纪要的 LLM 调用会计入真实 usage，子 agent 侧未采集账单数据。
 4. **GUI 与平台行为**：见第 4 节未完成清单。
-5. **0.1.1 的运行期边界**：`subagent/descriptor` label 的实际时序、guard 在真实子会话中的拦截、DSH 子 agent 模型选择池与 rc.5 安装/重启均未复验；397 项自动测试不替代这些部署验收。
+5. **0.1.1 的运行期边界（历史）**：`subagent/descriptor` label 的实际时序、guard 在真实子会话中的拦截、DSH 子 agent 模型选择池与 rc.5 安装/重启均未复验；397 项自动测试不替代这些部署验收。
+6. **0.2.0 的命令交互与范围**：交互式范围问答、分支/提交有界列表、`--base` 分支语义、自然语言要求、`--detail` 错误、`TURN_UNAVAILABLE` 均有自动化覆盖，但尚未做真实 DSH 命令问答与 GUI 目视验收；本版不将模拟问答和模型替身视为真实多席评审。

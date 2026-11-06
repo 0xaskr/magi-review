@@ -6,18 +6,20 @@ MAGI Review 是运行在 DeepSeek Harness（DSH）中的议会式代码评审系
 
 ## 安装与兼容
 
-当前版本 **0.1.1**，对接并验证的 DSH 版本为 **0.2.1-rc.5**。本仓库根目录就是 bundle，包名 `@local/dsh-magi-review`，无需构建、无需安装 npm 包。纯 ESM，零运行时依赖，不 import DSH 包；Host 通过注入的服务接入 DSH，Client 使用宿主模块加载器。
+当前版本 **0.2.0**，对接的 DSH 版本为 **0.2.1-rc.5**（自动验证与 GUI 验收边界见[验证记录](docs/verification.md)）。本版对齐 Codex `/review` 的命令操作体验，命令 `--base` 语义随之变化（见[命令](#命令-magi-review)）；工具 `magi_review` 新增 `branch`/`commit` 范围。本仓库根目录就是 bundle，包名 `@local/dsh-magi-review`，无需构建、无需安装 npm 包。纯 ESM，零运行时依赖，不 import DSH 包；Host 通过注入的服务接入 DSH，Client 使用宿主模块加载器。
 
 `package.json` 声明 `engines.dsh: ">=0.2.1-rc.5 <0.3.0"`、`engines.node: ">=22.19.0"`，并以 `peerDependencies` 列出所组合的 DSH 插件包（部分在 `peerDependenciesMeta` 中标为 optional）。DSH profile 设置 `autoInstallPeers: false`，这些 peer 是版本/兼容性声明，不由 pnpm 安装；仍然没有 npm 运行时依赖。
 
-在 DSH **desktop profile** 的 Plugins 页面选择本地目录安装，目标为仓库绝对路径。也可在该 profile 中调用 `plugin_manager`：
+在 DSH 的 Plugins 页面安装 GitHub 仓库，也可在目标 profile 中调用 `plugin_manager`：
 
 ```json
 {
   "action": "install_bundle",
-  "target": "C:\\Users\\mail\\Documents\\Github\\magi-review"
+  "target": "github:0xaskr/magi-review"
 }
 ```
+
+本地开发时也可把 `target` 改为仓库绝对路径。GitHub 安装锁定已解析的提交，本地修改不会直接更新已安装插件。
 
 安装后按 DSH 提示重载，检查 `magi_review` 工具及 `/magi-review` 命令。模型 provider、凭据、子 agent 模型选择设置和父会话权限沿用 DSH 配置。本地目录安装链接 checkout；`package.json.files` 为打包预留，包含 README 与 docs。调试工具 `magi_ping` 已退役，`debug.selftest` 仅保留配置兼容键。
 
@@ -28,13 +30,15 @@ MAGI Review 是运行在 DeepSeek Harness（DSH）中的议会式代码评审系
 | 参数 | 类型 / 默认值 | 含义 |
 |---|---|---|
 | `mode` | `quick` / `council`；默认 `council` | quick 只做独立陈词与最终投票，无讨论、脚本或纪要；council 为完整议会流程。 |
-| `target` | `auto` / `turn` / `working-tree` / `staged` / `base-ref` / `patch`；默认 `auto` | 选择被冻结的差异来源。 |
-| `base` | string；未设置 | `base-ref` 的 Git 引用；`auto` 带 base 时选择 `base-ref`。 |
+| `target` | `auto` / `turn` / `working-tree` / `staged` / `base-ref` / `branch` / `commit` / `patch`；默认 `auto` | 选择被冻结的差异来源。`branch` 比较基线分支与 HEAD 的 merge-base 到 HEAD；`commit` 审查单次提交；`base-ref` 保留旧的“引用与工作区比较”语义。 |
+| `base` | string；未设置 | `branch` / `base-ref` 的基线引用；工具 `auto` 带 base 时仍选择 `base-ref`（旧语义）。 |
+| `commit` | string；未设置 | `target=commit` 时必填，提交 SHA 或 Git 引用；相对第一父提交比较，根提交相对空树。 |
+| `instructions` | string；未设置 | 附加审查要求，写入 `intent.reviewInstructions` 并随会话意图传给席位；不改变已冻结的范围。 |
 | `paths` | string[]；未设置 | 按路径限定文件；当前相对原快照计算覆盖率，排除其他文件可能产生 partial，不能因此 approve。 |
 | `patch` | string；未设置 | `target=patch` 时必填，直接传 unified diff 文本；不是文件路径。 |
 | `seats` | `3` / `5` / `7`；默认 3 | 席位数；超出已配置名单的席位使用 general 视角，专业视角需在配置中定义。 |
 | `focus` | string[]；未设置 | 重点，例如 `security`、`tests`。 |
-| `detail` | `digest` / `full`；默认 `digest` | full 在结果值中附完整 `result`；给模型的文本渲染仍是摘要。 |
+| `detail` | `digest` / `full`；默认 `digest` | full 在结果值中附完整 `result`；给模型的文本渲染仍是摘要。命令已不提供该参数，只在工具保留。 |
 | `provider` | string；未设置 | reviewer 席位的 LLM provider id；必须与 `model` 成对提供，且精确匹配 DSH 子 agent 模型选择设置允许的路由之一。显式提供时覆盖该次调用的 `seats[].model` pin。 |
 | `model` | string；未设置 | reviewer 席位的 LLM model id；必须与 `provider` 成对提供。省略两者时使用允许路由池。 |
 
@@ -42,7 +46,7 @@ MAGI Review 是运行在 DeepSeek Harness（DSH）中的议会式代码评审系
 {"mode":"quick","target":"staged","seats":3,"focus":["security","tests"]}
 ```
 
-`auto` 当前由 Host 确定范围：有 base 则比较基线；否则工作区与 HEAD 比较（含未跟踪文件）；工作区无变更且有回合快照时尝试 `turn`。书记官解释冻结范围并提出模型分配，不重新选择快照。`turn` 依赖当前会话的 workspaceChanges；无法获取时可能回退工作区或返回 `NO_CHANGES`。`base-ref` 当前比较指定提交与工作区，不是 merge-base PR diff。
+工具的 `auto`：带 `base` 时仍选择 `base-ref`（引用与工作区比较，兼容旧语义）；否则工作区与 HEAD 比较（含未跟踪文件），工作区无变更且当前会话有回合快照时尝试 `turn`。显式 `target=turn` 但当前会话没有快照时返回 `TURN_UNAVAILABLE`，不会退回工作区；`auto` 的回合回退仍会降级到工作区。`branch` 只审查已提交差异（merge-base → HEAD），不包含未提交改动；`commit` 只审查该次提交相对第一父提交的改动（根提交相对空树；合并提交只与第一父比较，不另生成相对第二父的差异）。书记官解释冻结范围并提出模型分配，不重新选择快照。
 
 #### 模型选择
 
@@ -54,25 +58,50 @@ reviewer 席位默认使用 DSH 「允许 Agent 为子 agent 选择模型」设�
 
 ### 命令 `/magi-review`
 
+0.2.0 起命令对齐 Codex `/review` 的操作体验：不带参数时先用问答选择范围；带参数或自然语言要求时直接执行，未指定范围默认 `working-tree`（不再是 `auto`）。**`--base` 的语义已变化**：现在表示分支评审，比较基线分支与当前 HEAD 的 merge-base 到 HEAD，不包含未提交改动（明确的产品选择：分支评审只含已提交改动）；需要旧的“引用与工作区比较”时使用 `--target base-ref --base <ref>`。
+
 ```text
-/magi-review [quick|council] [--base <ref> | --staged | --target <kind>]
-             [--seats 3|5|7] [--focus <a,b>] [--detail digest|full]
+/magi-review [--uncommitted | --base <branch> | --commit <sha>] [审查要求]
+/magi-review [quick|council] [--seats 3|5|7] [--focus <a,b>]
              [--provider <id> --model <id>]
+/magi-review --staged
+/magi-review --target auto|turn|working-tree
+/magi-review --target base-ref --base <ref>
 /magi-review --report <id>
+/magi-review --help | -h
 ```
+
+不传参数时，DSH 会询问四项范围：审查未提交改动、与基线分支比较、审查某次提交、自定义审查要求（另有取消）。分支/提交选项从本地 Git 的有界列表选择，也可直接输入分支/引用或 SHA；取消、或当前入口无法显示问答时不会调用模型。带参数或自然语言要求时直接执行；未指定范围时默认 `working-tree`。`quick`/`council`、`--focus`、`--seats`、`--provider`/`--model` 保持可用。
+
+| 命令入口 | 冻结范围 |
+|---|---|
+| `--uncommitted` | `working-tree`：暂存、未暂存与未跟踪改动 |
+| `--base <branch>` | `branch`：基线分支与 HEAD 的 merge-base 到 HEAD，只含已提交改动 |
+| `--commit <sha>` | `commit`：该提交相对第一父提交；根提交相对空树 |
+| `--staged` | 仅暂存区 |
+| `--target auto` | 工作区优先；无改动且当前会话有回合快照时尝试 `turn` |
+| `--target base-ref --base <ref>` | 兼容旧语义：引用与工作区比较 |
+| `--target turn` | 当前回合快照；无快照返回 `TURN_UNAVAILABLE` |
+| 默认（带参数/自然语言要求） | `working-tree` |
 
 ```text
 /magi-review
-/magi-review quick --staged
-/magi-review --base main --seats 5 --focus security,tests
-/magi-review council --target working-tree --focus "security, public API" --detail full
+/magi-review --uncommitted
+/magi-review --base main
+/magi-review --commit a1b2c3d
+/magi-review "重点检查权限绕过和回归"
+/magi-review quick --staged --focus security,tests
+/magi-review --base main --seats 5 "重点检查兼容性"
 /magi-review quick --staged --provider deepseek-official --model deepseek-flash
 /magi-review --report 4741cc06-a1e4-4db5-a8df-7f717306f9fe
+/magi-review --help
 ```
 
-双引号或单引号可包裹含空格的参数，未闭合引号和未知参数会报错。解析不执行 shell，也不支持 shell 转义/插值。`--provider` 与 `--model` 必须成对提供，受 DSH 子 agent 模型选择设置约束，语义与工具的 `provider`/`model` 参数一致。`--patch` 不读取文件，请用工具的 `patch` 文本参数；命令没有 `--paths`。`ping` 按未知参数报错。
+范围选项互斥；重复参数、范围冲突、`--report`/`--help` 与评审参数组合都会报错。`--help`、`-h` 只显示用法，不调用模型；`--report <id>` 读取已有报告，不重新评审。双引号或单引号可包裹含空格的参数；`--` 之后的所有文字都作为审查要求。解析不执行 shell，也不支持 shell 转义/插值。`--provider` 与 `--model` 必须成对提供，受 DSH 子 agent 模型选择设置约束，语义与工具的 `provider`/`model` 参数一致。
 
-命令输出结构化 Markdown，不显示三灯卡，也不进入父模型上下文。`--report <id>` 读取已有报告，返回同样的 Markdown（最多 20 KiB，保留 reportId），不会重新评审或自动写出 Markdown 文件。`--detail full` 不改变命令的 Markdown 渲染。完整 JSON 在存储目录的 `reviews/<reportId>.json`；可复制该文件导出。报告不存在或存储失败时会明确报错。
+自然语言要求写入 `intent.reviewInstructions` 并随会话意图传给席位；它只补充审查重点，不改变已冻结的范围。显式 `--target turn` 在无回合快照时报 `TURN_UNAVAILABLE`，不会退回工作区；`auto` 的回合回退仍会降级到工作区。
+
+命令输出结构化 Markdown，不显示三灯卡，也不进入父模型上下文。`--report <id>` 返回同样的 Markdown（最多 20 KiB，保留 reportId），不会重新评审或自动写出 Markdown 文件。`--detail` 已从命令移除（会报明确错误）；完整 JSON 在存储目录的 `reviews/<reportId>.json`，可从 `reportId` 获取，或使用工具 `magi_review` 的 `detail` 参数。命令不支持 `--patch` 文件输入和 `--paths`；没有 `ping` 子命令，普通文字会作为审查要求。
 
 council 达到轮次上限时，**命令**可询问继续讨论或直接表决，默认等待 120 秒；**工具**直接表决，并在需要询问而未询问时记录 `human_confirmation_missing`。命令追加轮次只询问一次，仍受总超时约束。
 
@@ -123,7 +152,7 @@ council 达到轮次上限时，**命令**可询问继续讨论或直接表决�
 
 ## 架构与安全
 
-- **Host**：入口、冻结快照、意图上下文、模型路由、议会编排、结果存储。
+- **Host**：入口、命令交互（范围选择、`--help`、报告查询）、冻结快照、意图上下文、模型路由、议会编排、结果存储。
 - **Client**：聊天内三灯卡，运行中匿名占位，结果态展示揭示后的发现、讨论、裁决与纪要。
 - **子 agent 工具边界**：reviewer 子 agent 不注册独立 preset，而是通过 `ctx.subagents.startActivation` 加入调用会话自己的 mode（agent preset）并继承其工具。`lib/index.js` 在 `agent/created` 时为每个 `origin:'subagent'` 子会话按持久化 descriptor label 安装 deny-by-default guard：`magi-brief-*` 只放行 read/grep/glob/lsp/structured_output；`magi-discussion-*` 在此基础上按平台放行 bash 或 pwsh（`discussion.allowScripts:false` 时去掉）；`magi-ballot-*` 不放行任何工具。
 - **core 纯逻辑**：diff、指纹、合并、blocking、裁决、匿名化、脱敏、摘要和模板纪要，无 DSH 依赖。
@@ -136,6 +165,8 @@ council 达到轮次上限时，**命令**可询问继续讨论或直接表决�
 
 模型选择依赖 DSH 的 subagent 模型选择设置：该设置未启用时只能用 `models.defaultRoute` / `seats[].model`，显式 `provider`/`model` 会被 `MODEL_SELECTION_DISABLED` 拒绝。reviewer 子 agent 继承调用者的 mode，若调用者所在 mode 不提供文件读取工具（例如 PTC/minimal），reviewer 无法读取邻近文件，只能按 patch 评审；guard 仍禁止该阶段不允许的写入与 shell。继承工具 schema 本身可能比阶段允许列表更宽，实际边界是运行期 guard，不是注册期隔离。
 
+命令的交互式范围选择依赖 DSH `userQuestions.ask` 与可交互入口；在子 agent、委派调用或当前入口无法显示问答时，必须显式传 `--uncommitted`/`--base`/`--commit`/`--target`，否则命令直接报错且不发起评审，不会静默替用户选择范围。
+
 默认存储目录是 `~/.dsh/storages/magi-review/default`，报告位于 `reviews/`。`DSH_HOME` / `DSH_PROFILE` 环境变量可改变根目录/命名空间；当前入口不会自动发现 desktop profile 名，多 profile 部署需外部隔离。
 
 在仓库根目录运行（Node.js 需支持 ESM、node:test、structuredClone；Git 用于快照测试）：
@@ -146,10 +177,10 @@ node --test "test/unit/*.test.js"
 node --check lib/index.js
 ```
 
-测试无需启动 DSH 或调用模型；Git 测试仅在临时仓库构造夹具。本机 Windows 两项符号链接测试因 EPERM 跳过，不代表验证通过。0.1.1 的全量自动测试为 397 项 0 失败；本版未执行真实多席评审、GUI 三灯卡手工验收和 DSH 0.2.1-rc.5 安装/重启复验。已有真实运行记录、自动测试结果及 GUI 手工验收清单见 [验证记录](docs/verification.md)。
+测试无需启动 DSH 或调用模型；Git 测试仅在临时仓库构造夹具。本次 Linux 自动测试 **461 项通过，0 失败、0 跳过**，覆盖命令交互、`branch`/`commit` 快照和既有评审流程。历史 Windows 两项符号链接测试曾因 EPERM 跳过。真实问答界面、GUI 目视与真实多席评审仍需部署验收，见 [验证记录](docs/verification.md)。
 
 ## English
 
-**MAGI Council Review** is a native DeepSeek Harness bundle for code changes: independent briefs, anonymous discussion, sealed ballots, rule-based verdicts, reveal and minutes. Version 0.1.1 targets DSH 0.2.1-rc.5 and has no runtime npm dependencies. Reviewer seats default to the routes allowed by DSH's subagent model-selection setting; the clerk keeps the session's current model.
+**MAGI Council Review** is a native DeepSeek Harness bundle for code changes: independent briefs, anonymous discussion, sealed ballots, rule-based verdicts, reveal and minutes. Version 0.2.0 targets DSH 0.2.1-rc.5 and has no runtime npm dependencies. The `/magi-review` command follows a Codex `/review`-style flow (choose uncommitted changes, a base branch, or a single commit; natural-language instructions); reviewer seats default to the routes allowed by DSH's subagent model-selection setting, and the clerk keeps the session's current model.
 
 Install this repository as a local bundle in the desktop profile, then use `magi_review` or `/magi-review quick --staged`. `insufficient` is never approval. Findings are untrusted evidence; homogeneous councils have limited independence. `/magi-review --report <id>` renders saved Markdown; full JSON lives under `~/.dsh/storages/magi-review/default/reviews/`. See the [security notes](docs/security.md) and [verification record](docs/verification.md) for limits and pending checks.

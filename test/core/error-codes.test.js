@@ -4,7 +4,7 @@ import { ERROR_STAGES, ERROR_CODES, discussionMissingCode, ballotMissingCode, ma
 
 it('registers all specified stages and fixed codes', () => {
   assert.deepEqual(ERROR_STAGES, ['input', 'config', 'clerk', 'reviewer', 'discussion', 'aggregate', 'policy', 'minutes', 'reporter']);
-  assert.equal(Object.keys(ERROR_CODES).length, 15); for (const code of Object.values(ERROR_CODES)) assert.equal(isKnownCode(code), true);
+  assert.equal(Object.keys(ERROR_CODES).length, 16); for (const code of Object.values(ERROR_CODES)) assert.equal(isKnownCode(code), true);
   assert.equal(Object.isFrozen(ERROR_CODES), true); assert.equal(Object.isFrozen(ERROR_STAGES), true);
 });
 it('recognizes seat-specific missing discussion and ballot factories', () => {
